@@ -132,7 +132,7 @@ def explainer_node(state: dict) -> dict:
         model=MODEL_NAME,
         base_url=OPENROUTER_BASE_URL,
         api_key=OPENROUTER_API_KEY,
-        temperature=0.1,
+        temperature=0.3,
     ).bind_tools(EXPLAINER_TOOLS)
 
     messages = [
