@@ -1,0 +1,17 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.py[cod]
+*$py.class
+venv/
+ENV/
+env/
+
+# Environment: never commit real secrets
+.env
+
+# Data: checkpoints are local state, not source code
+data/
+*.db
