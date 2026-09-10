@@ -1,0 +1,20 @@
+[tool.pytest.ini_options]
+# Add src/ to Python path so tests can import from graph, agents, etc.
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+# Skip eval tests by default, they require Ollama running.
+# Run all tests:        pytest tests/
+# Run unit tests only:  pytest tests/ -m "not eval"
+# Run eval tests only:  pytest tests/test_eval.py -m eval -s
+addopts = "-m 'not eval'"
+
+# Test markers, keeps fast and slow tests clearly separated
+markers = [
+    "unit: fast tests, no external dependencies",
+    "eval: slow evaluation tests requiring Ollama (LLM-as-judge)",
+]
+
+[tool.pyright]
+pythonPath = "src"

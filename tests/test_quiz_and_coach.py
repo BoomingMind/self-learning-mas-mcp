@@ -52,39 +52,36 @@ class TestGenerateQuestions:
         ]
         return json.dumps({"questions": questions})
 
-    @patch("agents.quiz_generator.ChatOllama")
-    def test_returns_questions_from_valid_json(self, mock_ollama):
+    @patch("agents.quiz_generator.create_agent")
+    def test_returns_questions_from_valid_json(self, mock_create_agent):
         """Valid LLM JSON response should return a list of questions."""
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content=self._make_valid_json(3))
-        mock_ollama.return_value.bind_tools = MagicMock(return_value=mock_llm)
-        mock_ollama.return_value = mock_llm
+        mock_create_agent.return_value.invoke.return_value = {
+            "messages": [AIMessage(content=self._make_valid_json(3))]
+        }
 
         result = generate_questions("Closures", "explanation text", n=3)
         assert isinstance(result, list)
         assert len(result) == 3
         assert result[0]["question"] == "Question 0?"
 
-    @patch("agents.quiz_generator.ChatOllama")
-    def test_fallback_on_invalid_json(self, mock_ollama):
+    @patch("agents.quiz_generator.create_agent")
+    def test_fallback_on_invalid_json(self, mock_create_agent):
         """Invalid JSON should return one fallback question, not raise."""
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content="this is not json {{{")
-        mock_ollama.return_value = mock_llm
+        mock_create_agent.return_value.invoke.return_value = {
+            "messages": [AIMessage(content="this is not json {{{")]
+        }
 
         result = generate_questions("Closures", "explanation", n=3)
         assert isinstance(result, list)
         assert len(result) == 1
         assert "Closures" in result[0]["question"]
 
-    @patch("agents.quiz_generator.ChatOllama")
-    def test_fallback_on_missing_questions_key(self, mock_ollama):
+    @patch("agents.quiz_generator.create_agent")
+    def test_fallback_on_missing_questions_key(self, mock_create_agent):
         """JSON without 'questions' key should return fallback."""
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(
-            content=json.dumps({"something_else": []})
-        )
-        mock_ollama.return_value = mock_llm
+        mock_create_agent.return_value.invoke.return_value = {
+            "messages": [AIMessage(content=json.dumps({"something_else": []}))]
+        }
 
         result = generate_questions("Topic", "explanation", n=2)
         assert len(result) == 1  # fallback
@@ -93,8 +90,8 @@ class TestGenerateQuestions:
 class TestGradeAnswer:
     """Tests for the grading function."""
 
-    @patch("agents.quiz_generator.ChatOllama")
-    def test_returns_grade_dict_from_valid_json(self, mock_ollama):
+    @patch("agents.quiz_generator.create_agent")
+    def test_returns_grade_dict_from_valid_json(self, mock_create_agent):
         """Valid grading JSON should return dict with expected keys."""
         grade_json = json.dumps({
             "correct": True,
@@ -102,21 +99,21 @@ class TestGradeAnswer:
             "feedback": "Good understanding shown.",
             "missing_concept": "",
         })
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content=grade_json)
-        mock_ollama.return_value = mock_llm
+        mock_create_agent.return_value.invoke.return_value = {
+            "messages": [AIMessage(content=grade_json)]
+        }
 
         result = grade_answer("What is a closure?", "A function capturing...", "My answer")
         assert result["correct"] is True
         assert result["score"] == 0.85
         assert "feedback" in result
 
-    @patch("agents.quiz_generator.ChatOllama")
-    def test_safe_default_on_invalid_json(self, mock_ollama):
+    @patch("agents.quiz_generator.create_agent")
+    def test_safe_default_on_invalid_json(self, mock_create_agent):
         """Invalid grading JSON should return safe default, not raise."""
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value = MagicMock(content="not json")
-        mock_ollama.return_value = mock_llm
+        mock_create_agent.return_value.invoke.return_value = {
+            "messages": [AIMessage(content="not json")]
+        }
 
         result = grade_answer("Q?", "Expected", "Student answer")
         assert "correct" in result

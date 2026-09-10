@@ -73,6 +73,14 @@ class TestLangfuseConfigured:
         }):
             assert _langfuse_configured() is False
 
+    def test_returns_false_when_keys_are_swapped(self):
+        """A swapped public/secret pair should not enable tracing."""
+        with patch.dict(os.environ, {
+            "LANGFUSE_PUBLIC_KEY": "sk-lf-test",
+            "LANGFUSE_SECRET_KEY": "pk-lf-test",
+        }):
+            assert _langfuse_configured() is False
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # get_langfuse_handler tests
@@ -134,6 +142,44 @@ class TestGetLangfuseHandler:
                 assert handler is not None, (
                     "Handler should be created when credentials are present"
                 )
+
+    def test_handler_uses_current_langfuse_constructor(self):
+        """The handler should not pass removed Langfuse 3.x constructor args."""
+        with patch.dict(os.environ, {
+            "LANGFUSE_PUBLIC_KEY": "pk-lf-test",
+            "LANGFUSE_SECRET_KEY": "sk-lf-test",
+        }):
+            with patch("observability.langfuse_setup._langfuse_configured",
+                       return_value=True):
+                with patch(
+                    "langfuse.langchain.CallbackHandler",
+                    return_value=object(),
+                ) as callback_handler:
+                    assert get_langfuse_handler("session-001") is not None
+                    callback_handler.assert_called_once_with(
+                        public_key="pk-lf-test",
+                    )
+
+    def test_initializes_langfuse_client_before_handler(self):
+        """The callback must resolve an initialized client for its public key."""
+        with patch.dict(os.environ, {
+            "LANGFUSE_PUBLIC_KEY": "pk-lf-client-init",
+            "LANGFUSE_SECRET_KEY": "sk-lf-client-init",
+            "LANGFUSE_HOST": "http://localhost:3000",
+        }):
+            with patch("observability.langfuse_setup._langfuse_configured",
+                       return_value=True):
+                with patch("langfuse.Langfuse", return_value=object()) as client:
+                    with patch(
+                        "langfuse.langchain.CallbackHandler",
+                        return_value=object(),
+                    ):
+                        assert get_langfuse_handler("session-001") is not None
+                    client.assert_called_once_with(
+                        public_key="pk-lf-client-init",
+                        secret_key="sk-lf-client-init",
+                        base_url="http://localhost:3000",
+                    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

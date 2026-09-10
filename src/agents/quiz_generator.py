@@ -1,19 +1,49 @@
+"""
+src/agents/quiz_generator.py
+
+The Quiz Generator agent.
+
+Responsibilities:
+  1. Generate quiz questions based on the explained topic
+  2. Present questions to the user interactively via input()
+  3. Grade each answer using the LLM as judge
+  4. Return a QuizResult with score and identified weak areas
+
+The same generate_questions and grade_answer functions are also reused
+by the A2A service wrapper in src/a2a_services/quiz_service.py. The core
+logic is identical in both modes; only the input/output mechanism changes
+(terminal vs HTTP).
+
+Architecture pattern:
+  Two separate LLM calls with different purposes:
+    - Generation call: creative, higher temperature, produces questions
+    - Grading call: analytical, very low temperature, produces scores
+  Separating these prevents the grader from being influenced by
+  the generator's style or vice versa.
+"""
+
 import json
 import os
 from datetime import datetime, timezone
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain.agents import create_agent
+from langchain_core.messages import HumanMessage
+from langchain_ollama import ChatOllama
 
 from graph.state import QuizQuestion, QuizResult, get_current_topic
 
-MODEL_NAME = os.getenv("OPEN_OPENROUTER_MODEL", "thinkingmachines/inkling:free")
-OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
-GENERATION_PROMPT = """You are a quiz designer for a student learning programming.
+MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
-Given a topic and explanation, generate {n} quiz questions that test
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Question generation
+# ─────────────────────────────────────────────────────────────────────────────
+
+GENERATION_PROMPT = """You are a quiz-generation agent for a student learning programming.
+
+Given the topic and explanation in the user request, generate {n} quiz questions that test
 genuine understanding, not just the ability to repeat memorized phrases.
 
 Good questions require the student to:
@@ -22,7 +52,7 @@ Good questions require the student to:
   - Identify edge cases or common mistakes
   - Compare related concepts
 
-Return ONLY valid JSON with no prose or markdown:
+Your final response must be ONLY valid JSON with no prose or markdown:
 {{
   "questions": [
     {{
@@ -36,22 +66,18 @@ Return ONLY valid JSON with no prose or markdown:
 Rules:
   - Include at least one question about a common mistake or gotcha
   - expected_answer should be concise but complete
-  - Avoid yes/no questions. Ask for explanation or demonstration
+  - Avoid yes/no questions, ask for explanation or demonstration
 """
 
-GRADING_PROMPT = """You are a fair teacher grading a student's answer.
+GRADING_PROMPT = """You are a fair grading agent.
 
-Question: {question}
-Model answer: {expected_answer}
-Student's answer: {student_answer}
-
-Grade the student's answer honestly. Be generous with partial credit:
+Grade the student's answer against the provided model answer. Be generous with partial credit:
   - Fundamentally correct with minor gaps: 0.7-0.9
   - Correct concept but imprecise: 0.5-0.7
   - Partially correct: 0.3-0.5
   - Fundamentally wrong: 0.0-0.2
 
-Return ONLY valid JSON with no prose or markdown:
+Your final response must be ONLY valid JSON with no prose or markdown:
 {{
   "correct": true,
   "score": 0.85,
@@ -60,29 +86,58 @@ Return ONLY valid JSON with no prose or markdown:
 }}
 """
 
+
 def generate_questions(topic: str, explanation: str, n: int = 3) -> list[dict]:
-    """Generate n quiz questions from the Explainer's output."""
-    llm = ChatOpenAI(
+    """
+    Call the LLM to generate n quiz questions about a topic.
+
+    Args:
+        topic:       The topic title being quizzed.
+        explanation: The explanation the Explainer produced (context).
+        n:           Number of questions to generate.
+
+    Returns:
+        List of question dicts with keys: question, expected_answer, difficulty.
+        Falls back to one generic question if LLM output can't be parsed.
+    """
+    llm = ChatOllama(
         model=MODEL_NAME,
-        base_url=OPENROUTER_BASE_URL,
-        api_key=OPENROUTER_API_KEY,
-        temperature=0.4,
+        base_url=OLLAMA_BASE_URL,
+        temperature=0.4,   # Some creativity for varied questions
+        format="json",
     )
 
     prompt = GENERATION_PROMPT.format(n=n)
     try:
-        response = llm.invoke([
-            SystemMessage(content=prompt),
-            HumanMessage(content=f"Topic: {topic}\n\nExplanation:\n{explanation}"),
-        ])
+        result = create_agent(
+            model=llm,
+            system_prompt=prompt,
+            name="quiz_question_generator",
+        ).invoke({
+            "messages": [
+                HumanMessage(content=f"Topic: {topic}\n\nExplanation:\n{explanation}"),
+            ],
+        })
+        response = result["messages"][-1]
+    except Exception as e:
+        print(f"[Quiz Generator] LLM call failed during question generation: {e}")
+        # Return minimal fallback so the quiz can still run
+        return [{
+            "question": f"What is the main concept covered in {topic}?",
+            "expected_answer": "See your study notes for this topic.",
+            "difficulty": "medium",
+        }]
+
+    try:
         data = json.loads(response.content)
         questions = data.get("questions", [])
         if questions and isinstance(questions, list):
             return questions
-    except Exception as e:
-        print(f"[Quiz Generator] LLM call failed during question generation: {e}")
+    except (json.JSONDecodeError, KeyError):
+        pass
 
-    # Fallback: one generic question
+    # Fallback: one generic question if parsing fails
+    print("[Quiz Generator] Warning: could not parse questions, using fallback")
     return [{
         "question": f"In your own words, explain the key concept of {topic} and why it matters.",
         "expected_answer": "A clear explanation demonstrating conceptual understanding.",
@@ -91,34 +146,84 @@ def generate_questions(topic: str, explanation: str, n: int = 3) -> list[dict]:
 
 
 def grade_answer(question: str, expected: str, student_answer: str) -> dict:
-    """Grade a student's answer using the LLM as judge."""
-    llm = ChatOpenAI(
-        model=MODEL_NAME,
-        base_url=OPENROUTER_BASE_URL,
-        api_key=OPENROUTER_API_KEY,
-        temperature=0.1,
-    )
+    """
+    Use the LLM to grade a student's answer against the expected answer.
 
-    prompt = GRADING_PROMPT.format(
-        question=question,
-        expected_answer=expected,
-        student_answer=student_answer,
+    Args:
+        question:       The question that was asked.
+        expected:       The model answer.
+        student_answer: What the student wrote.
+
+    Returns:
+        Dict with keys: correct (bool), score (float), feedback (str),
+        missing_concept (str).
+        Returns a safe default if LLM output can't be parsed.
+    """
+    # Very low temperature, grading should be consistent and analytical
+    llm = ChatOllama(
+        model=MODEL_NAME,
+        base_url=OLLAMA_BASE_URL,
+        temperature=0.1,
+        format="json",
     )
 
     try:
-        response = llm.invoke([HumanMessage(content=prompt)])
-        return json.loads(response.content)
+        result = create_agent(
+            model=llm,
+            system_prompt=GRADING_PROMPT,
+            name="quiz_grader",
+        ).invoke({
+            "messages": [HumanMessage(content=(
+                f"Question: {question}\n"
+                f"Model answer: {expected}\n"
+                f"Student's answer: {student_answer}"
+            ))],
+        })
+        response = result["messages"][-1]
     except Exception as e:
         print(f"[Quiz Generator] LLM call failed during grading: {e}")
+        # Return partial credit so the session can continue
         return {
             "correct": False,
             "score": 0.5,
-            "feedback": "Could not grade automatically. Please review manually.",
+            "feedback": "Could not grade answer due to a connection error.",
             "missing_concept": "",
         }
 
+    try:
+        return json.loads(response.content)
+    except json.JSONDecodeError:
+        # Safe default if grading fails
+        return {
+            "correct": False,
+            "score": 0.0,
+            "feedback": "Could not grade automatically, please review manually.",
+            "missing_concept": "",
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Interactive quiz runner
+# ─────────────────────────────────────────────────────────────────────────────
+
 def run_quiz(topic: str, explanation: str) -> QuizResult:
-    """Run an interactive quiz session in the terminal."""
+    """
+    Run a complete interactive quiz on a topic.
+
+    Generates questions, collects answers via input(), grades each,
+    and returns a QuizResult.
+
+    The same generate_questions and grade_answer functions back the A2A
+    service wrapper in src/a2a_services/quiz_service.py. The quiz logic
+    is identical; only how answers are collected changes.
+
+    Args:
+        topic:       The topic being quizzed.
+        explanation: The Explainer's output (context for question generation).
+
+    Returns:
+        QuizResult with questions, scores, and identified weak areas.
+    """
     print(f"\n{'='*60}")
     print(f"Quiz: {topic}")
     print(f"{'='*60}")
@@ -136,6 +241,8 @@ def run_quiz(topic: str, explanation: str) -> QuizResult:
 
         print(f"Question {i} [{difficulty}]: {question_text}")
         user_answer = input("Your answer: ").strip()
+
+        # Handle empty answers
         if not user_answer:
             user_answer = "(no answer provided)"
 
@@ -148,8 +255,10 @@ def run_quiz(topic: str, explanation: str) -> QuizResult:
         missing = grade.get("missing_concept", "")
 
         total_score += score
+
+        # Show result
         status = "✓" if correct else "✗"
-        print(f"{status} Score: {score:.0%}. {feedback}\n")
+        print(f"{status} Score: {score:.0%}, {feedback}\n")
 
         if missing:
             weak_areas.append(missing)
@@ -163,11 +272,13 @@ def run_quiz(topic: str, explanation: str) -> QuizResult:
             score=score,
         ))
 
+    # Calculate overall score
     avg_score = total_score / len(questions_data) if questions_data else 0.0
     correct_count = sum(1 for q in graded_questions if q.correct)
 
     print(f"{'='*60}")
-    print(f"Quiz complete! Score: {avg_score:.0%} ({correct_count}/{len(graded_questions)} correct)")
+    print(f"Quiz complete! Score: {avg_score:.0%} "
+          f"({correct_count}/{len(graded_questions)} correct)")
     if weak_areas:
         print(f"Areas to review: {', '.join(set(weak_areas))}")
     print(f"{'='*60}\n")
@@ -180,20 +291,31 @@ def run_quiz(topic: str, explanation: str) -> QuizResult:
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The LangGraph node
+# ─────────────────────────────────────────────────────────────────────────────
+
 def quiz_generator_node(state: dict) -> dict:
     """
     LangGraph node: Quiz Generator
 
-    Reads:  state["roadmap"], state["current_topic_index"], state["messages"]
-    Writes: state["quiz_results"], state["weak_areas"], state["error"]
+    Reads:
+        state["roadmap"]             : to get the current topic
+        state["current_topic_index"]: which topic we're on
+        state["messages"]            : to extract the explanation
+
+    Writes:
+        state["quiz_results"]        : appends the new QuizResult
+        state["weak_areas"]          : accumulated weak areas (deduplicated)
+        state["error"]               : error string on failure
     """
     topic = get_current_topic(state)
     if topic is None:
-        return {"error": "No current topic. Curriculum Planner must run first"}
+        return {"error": "No current topic, Curriculum Planner must run first"}
 
-    # Extract the Explainer's final response from message history.
-    # The Explainer's output is the last AIMessage that has no tool_calls.
-    # Tool-calling responses have content too, but they also have tool_calls set.
+    # Extract the most recent explanation from messages
+    # The Explainer's final response is the last AIMessage with no tool calls
     from langchain_core.messages import AIMessage
     messages = state.get("messages", [])
     explanation = ""
@@ -209,6 +331,7 @@ def quiz_generator_node(state: dict) -> dict:
     print(f"\n[Quiz Generator] Generating quiz for: '{topic.title}'")
     quiz_result = run_quiz(topic.title, explanation)
 
+    # Accumulate results
     existing_results = state.get("quiz_results", [])
     all_weak_areas = list(set(
         state.get("weak_areas", []) + quiz_result.weak_areas
@@ -218,7 +341,6 @@ def quiz_generator_node(state: dict) -> dict:
         "quiz_results": existing_results + [quiz_result],
         "weak_areas": all_weak_areas,
         "error": None,
-        # Pass state forward explicitly to preserve it across interrupt/resume
         "roadmap": state.get("roadmap"),
         "current_topic_index": state.get("current_topic_index", 0),
         "session_id": state.get("session_id", ""),

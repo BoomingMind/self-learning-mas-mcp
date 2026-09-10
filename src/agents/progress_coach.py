@@ -12,13 +12,15 @@ services are unavailable.
 
 import json
 import os
+import asyncio
 from datetime import datetime, timezone
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain.agents import create_agent
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_ollama import ChatOllama
 
-from graph.state import QuizResult, StudyRoadmap, get_latest_quiz_result
-from mcp_servers.memory_server import memory_set
+from graph.state import get_latest_quiz_result
+from mcp_client import call_tool
 
 
 MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
@@ -29,14 +31,12 @@ PASS_THRESHOLD = 0.5
 QUIZ_SERVICE_URL = os.getenv("QUIZ_SERVICE_URL", "http://localhost:9001")
 
 
-COACHING_PROMPT = """You are an encouraging learning coach reviewing a student's quiz results.
+COACHING_PROMPT = """You are an encouraging coaching agent reviewing a student's quiz results.
 
-Provide a brief, warm coaching message (2-3 sentences max) based on:
-  - The topic studied
-  - Their score (0.0 = 0%, 1.0 = 100%)
-  - Any weak areas identified
+Use the topic, score, and weak areas in the user request to provide a brief,
+warm coaching message (2-3 sentences max).
 
-Return ONLY valid JSON:
+Your final response must be ONLY valid JSON:
 {{
   "summary": "2-3 sentence encouraging summary",
   "encouragement": "One short motivational sentence for next steps"
@@ -63,10 +63,14 @@ def get_coaching_message(topic: str, score: float, weak_areas: list[str]) -> dic
     }
 
     try:
-        response = llm.invoke([
-            SystemMessage(content=COACHING_PROMPT),
-            HumanMessage(content=json.dumps(context)),
-        ])
+        result = create_agent(
+            model=llm,
+            system_prompt=COACHING_PROMPT,
+            name="progress_coach",
+        ).invoke({
+            "messages": [HumanMessage(content=json.dumps(context))],
+        })
+        response = result["messages"][-1]
     except Exception as e:
         print(f"[Progress Coach] LLM call failed: {e}")
         return {
@@ -231,20 +235,30 @@ def progress_coach_node(state: dict) -> dict:
 
     # ── Persist progress via MCP memory ──────────────────────────────
     # Safe status read, guard idx before subscripting
-    _topic_obj = topics[idx] if idx < len(topics) else None
-    _status = (
-        "done" if _topic_obj is None
-        else _topic_obj.get("status", "done") if isinstance(_topic_obj, dict)
-        else _topic_obj.status
+    topic_obj = topics[idx] if idx < len(topics) else None
+    status = (
+        "done"
+        if topic_obj is None
+        else topic_obj.get("status", "done")
+        if isinstance(topic_obj, dict)
+        else topic_obj.status
     )
     progress_data = json.dumps({
         "topic":      latest.topic,
         "score":      score,
         "weak_areas": latest.weak_areas,
-        "status":     _status,
+        "status":     status,
         "timestamp":  datetime.now(timezone.utc).isoformat(),
     })
-    memory_set(session_id, f"progress_topic_{idx}", progress_data)
+    asyncio.run(call_tool(
+        "memory",
+        "memory_set",
+        {
+            "session_id": session_id,
+            "key": f"progress_topic_{idx}",
+            "value": progress_data,
+        },
+    ))
 
     # ── Print coaching message ────────────────────────────────────────
     print(f"\n{'─'*60}")

@@ -1,0 +1,47 @@
+# requirements.txt
+# All versions are pinned for reproducibility.
+# Do not remove version pins, this ensures the tutorial works consistently.
+
+# ── Core agent framework ──────────────────────────────────────────────────
+langgraph==1.1.0
+langgraph-checkpoint-sqlite==3.0.3
+langchain-core==1.0.0
+langchain==1.0.0
+langchain-ollama==0.3.10
+langchain-mcp-adapters==0.1.9
+langchain-openai==1.0.1
+
+# ── MCP protocol ─────────────────────────────────────────────────────────
+mcp==1.26.0
+
+# ── A2A protocol ─────────────────────────────────────────────────────────
+a2a-sdk==0.3.25
+
+# ── Cross-framework interop ───────────────────────────────────────────────
+crewai==1.13.0
+
+# ── Observability ─────────────────────────────────────────────────────────
+langfuse==4.0.1
+
+# ── Evaluation ────────────────────────────────────────────────────────────
+deepeval==3.9.1
+
+# ── LLM gateway ───────────────────────────────────────────────────────────
+# Required by DeepEval for the Ollama judge, see tests/test_eval.py
+litellm==1.82.4
+
+# ── HTTP and API utilities ────────────────────────────────────────────────
+openai==2.8.0
+httpx==0.28.1
+fastapi==0.115.0
+uvicorn==0.34.0
+streamlit==1.43.2
+
+# ── Data and utilities ────────────────────────────────────────────────────
+pydantic==2.11.9
+python-dotenv==1.1.1
+tenacity==8.5.0
+
+# ── Testing ───────────────────────────────────────────────────────────────
+pytest==8.3.0
+pytest-asyncio==0.25.0

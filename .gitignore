@@ -15,3 +15,23 @@ env/
 # Data: checkpoints are local state, not source code
 data/
 *.db
+
+# Instructions: batch files and setup instructions (author-only)
+instructions/
+
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.windsurf/
+*.swp
+*.iml
+
+# Author-only working directories (knowledge graph, scratch batches)
+graphify-out/
+windsurf_batches/
+
+# Test caches
+.pytest_cache/
+.deepeval/
