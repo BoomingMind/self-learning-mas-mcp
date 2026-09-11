@@ -9,10 +9,9 @@ Responsibilities:
   3. Grade each answer using the LLM as judge
   4. Return a QuizResult with score and identified weak areas
 
-The same generate_questions and grade_answer functions are also reused
-by the A2A service wrapper in src/a2a_services/quiz_service.py. The core
-logic is identical in both modes; only the input/output mechanism changes
-(terminal vs HTTP).
+The generation and grading functions are used directly by the LangGraph,
+terminal, and Streamlit interfaces. Quiz execution is intentionally
+in-process and is not wrapped as an A2A service.
 
 Architecture pattern:
   Two separate LLM calls with different purposes:
@@ -279,9 +278,8 @@ def run_quiz(topic: str, explanation: str, model_provider: str = "ollama", model
     Generates questions, collects answers via input(), grades each,
     and returns a QuizResult.
 
-    The same generate_questions and grade_answer functions back the A2A
-    service wrapper in src/a2a_services/quiz_service.py. The quiz logic
-    is identical; only how answers are collected changes.
+    The same generation and grading functions are shared by the LangGraph,
+    terminal, and Streamlit interfaces.
 
     Args:
         topic:       The topic being quizzed.

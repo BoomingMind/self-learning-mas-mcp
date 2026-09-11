@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 
-rem Start the Streamlit UI and both existing A2A services.
+rem Start the Streamlit UI and the CrewAI Study Buddy A2A service.
 rem A2A client calls are made by the application through a2a_services\a2a_client.py.
 
 set "ROOT=%~dp0"
@@ -21,9 +21,6 @@ if exist "%ROOT%.env" (
     )
 )
 
-echo Starting Quiz Generator A2A service on http://localhost:9001 ...
-start "Learning Accelerator - Quiz A2A" /D "%ROOT%" cmd /k ""%PYTHON%" src\a2a_services\quiz_service.py"
-
 echo Starting CrewAI Study Buddy A2A service on http://localhost:9002 ...
 start "Learning Accelerator - Study Buddy A2A" /D "%ROOT%" cmd /k ""%PYTHON%" src\crewai_agent\study_buddy.py"
 
@@ -35,7 +32,6 @@ start "Learning Accelerator - Streamlit" /D "%ROOT%" cmd /k ""%PYTHON%" -m strea
 echo.
 echo Learning Accelerator started.
 echo Streamlit:    http://localhost:8501
-echo Quiz A2A:     http://localhost:9001
 echo Study Buddy:  http://localhost:9002
 echo.
 echo Keep the three service windows open while using the application.

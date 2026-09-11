@@ -1,13 +1,12 @@
 """
 src/agents/progress_coach.py
 
-The Progress Coach agent with A2A delegation support.
+The Progress Coach agent with optional Study Buddy A2A support.
 
 Reads quiz results, generates personalized coaching messages,
 updates topic status in the roadmap, and optionally delegates
-to the external Quiz A2A service or the CrewAI Study Buddy
-for supplementary help. Falls back gracefully when external
-services are unavailable.
+to the CrewAI Study Buddy for supplementary help. Quiz generation and grading
+are completed by the preceding native LangGraph Quiz Generator node.
 """
 
 import json
@@ -24,10 +23,6 @@ from model_config import build_chat_model
 
 
 PASS_THRESHOLD = 0.5
-
-# A2A service URL, read from env so it's configurable
-QUIZ_SERVICE_URL = os.getenv("QUIZ_SERVICE_URL", "http://localhost:9001")
-
 
 COACHING_PROMPT = """You are an encouraging coaching agent reviewing a student's quiz results.
 
@@ -82,55 +77,6 @@ def get_coaching_message(topic: str, score: float, weak_areas: list[str], model_
             "summary":      f"You scored {score:.0%} on {topic}.",
             "encouragement": "Keep going, every topic builds on the last!",
         }
-
-
-def try_a2a_quiz_delegation(
-    topic: str,
-    explanation: str,
-    answers: list[str],
-) -> dict | None:
-    """
-    Attempt to delegate quiz grading to the A2A Quiz Service.
-
-    Returns the grading result dict if successful, None if the
-    service is unavailable or returns an error.
-
-    The Progress Coach calls this first. If it returns None,
-    the coach falls back to local quiz generation.
-    """
-    # Read at call time, not module load time (fixes test timing bug)
-    use_a2a = os.getenv("USE_A2A_QUIZ", "true").lower() == "true"
-    if not use_a2a:
-        return None
-
-    try:
-        from a2a_services.a2a_client import delegate_quiz_task, is_quiz_service_available
-
-        if not is_quiz_service_available(QUIZ_SERVICE_URL):
-            print("[Progress Coach] Quiz A2A service not available at "
-                  f"{QUIZ_SERVICE_URL}, using local quiz generator")
-            return None
-
-        print(f"[Progress Coach] Delegating quiz to A2A service: {QUIZ_SERVICE_URL}")
-        result = delegate_quiz_task(
-            topic=topic,
-            explanation=explanation,
-            answers=answers,
-            quiz_service_url=QUIZ_SERVICE_URL,
-        )
-
-        if "error" in result:
-            print(f"[Progress Coach] A2A delegation failed: {result['error']}")
-            return None
-
-        print(f"[Progress Coach] A2A quiz complete: score={result.get('score', 0):.0%}")
-        return result
-
-    except ImportError:
-        return None
-    except Exception as e:
-        print(f"[Progress Coach] A2A error: {e}")
-        return None
 
 
 def try_study_buddy_assistance(

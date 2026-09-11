@@ -54,13 +54,6 @@ class TestStudyBuddyAgentCard:
         ).lower()
         assert "crewai" in card_text
 
-    def test_different_port_from_quiz_service(self):
-        """Study Buddy and Quiz Service must be on different ports."""
-        from crewai_agent.study_buddy import STUDY_BUDDY_CARD
-        from a2a_services.quiz_service import QUIZ_AGENT_CARD
-        assert STUDY_BUDDY_CARD.url != QUIZ_AGENT_CARD.url
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # CrewAI crew builder tests
 # ─────────────────────────────────────────────────────────────────────────────
