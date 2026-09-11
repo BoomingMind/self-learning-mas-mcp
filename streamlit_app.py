@@ -180,6 +180,16 @@ def _append_explainer_turn(question: str, response: str) -> None:
     _save_active_session()
 
 
+def _start_topic_conversation(title: str, response: str) -> None:
+    """Start a fresh transcript when the learner changes topics."""
+    st.session_state.explainer_turns = [{
+        "question": f"Explain {title}",
+        "response": response,
+    }]
+    _persist_explainer_history()
+    _save_active_session()
+
+
 def _restore_explainer_history_from_checkpoint() -> None:
     """Hydrate the visible transcript from the active graph checkpoint."""
     config = st.session_state.get("graph_config")
@@ -535,11 +545,7 @@ def approve_roadmap(approved: bool):
     title, desc = get_topic_info(result, idx)
     st.session_state.topic_title = title
     st.session_state.topic_description = desc
-    st.session_state.explainer_turns = [{
-        "question": f"Explain {title}",
-        "response": explanation,
-    }]
-    _persist_explainer_history()
+    _start_topic_conversation(title, explanation)
 
     # Keep the learner in the Explainer; quiz generation is explicit.
     go_to("EXPLAINING")
@@ -653,10 +659,7 @@ def continue_after_coaching(review: bool = False):
     title, desc = get_topic_info(result, idx)
     st.session_state.topic_title = title
     st.session_state.topic_description = desc
-    st.session_state.explainer_turns = [{
-        "question": f"Explain {title}",
-        "response": st.session_state.explanation,
-    }]
+    _start_topic_conversation(title, st.session_state.explanation)
     st.session_state.coaching_message = ""
     st.session_state.study_buddy_assistance = ""
     go_to("EXPLAINING")
