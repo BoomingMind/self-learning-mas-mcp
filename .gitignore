@@ -35,3 +35,4 @@ windsurf_batches/
 # Test caches
 .pytest_cache/
 .deepeval/
+settings.json

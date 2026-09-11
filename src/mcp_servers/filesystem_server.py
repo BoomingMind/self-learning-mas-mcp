@@ -1,29 +1,26 @@
 """
 mcp_servers/filesystem_server.py
 
-MCP server providing filesystem access to study materials.
+Compatibility MCP server for browsing a local markdown directory.
 
-This server exposes the student's study notes to any agent
-that connects via MCP. It runs as a separate process and
-communicates over stdio transport.
+This utility is kept for local-file discovery and compatibility checks.
+It is not required for the active adaptive-learning workflow, which
+prefers learner memory, Tavily search, and OneCompiler execution.
 
 Tools exposed:
-    list_study_files()         : discover what materials exist
-    read_study_file(filename)  : read a specific note file
+    list_study_files()         : discover available markdown files
+    read_study_file(filename)  : read a specific file from the configured directory
     search_notes(query)        : find relevant sections by keyword
 
 Resources exposed:
-    notes://index              : summary of all available materials
+    notes://index              : summary of the available files
 
 Security:
-    Path traversal prevention, agents cannot read files outside
-    the designated notes directory.
+    Path traversal prevention keeps agents from reading files outside
+    the configured directory.
 
 Run standalone for testing:
     python mcp_servers/filesystem_server.py
-
-Connect from LangGraph agents:
-    See agents/explainer.py
 """
 
 import os
@@ -41,9 +38,10 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("Filesystem Server")
 
-# Base path for study materials.
-# Read from .env so it can be changed without code modifications.
-# The Explainer agent will pass this path when it connects.
+# Base directory for optional markdown files.
+# Read from the environment so the location can be changed without code
+# edits. This server is compatibility-only and is not required by the
+# active learning workflow.
 NOTES_BASE = Path(os.getenv("NOTES_PATH", "study_materials/sample_notes"))
 
 
@@ -65,13 +63,13 @@ NOTES_BASE = Path(os.getenv("NOTES_PATH", "study_materials/sample_notes"))
 @mcp.tool()
 def list_study_files() -> list[str]:
     """
-    List all available study note files.
+    List available markdown files in the configured directory.
 
-    Returns a list of filenames relative to the notes directory.
+    Returns filenames relative to the configured base directory.
     Example: ['closures.md', 'decorators.md', 'python_basics.md']
 
-    Always call this first to discover what materials are available
-    before attempting to read specific files.
+    Useful when an agent wants to inspect local markdown resources, but
+    it is not needed by the core adaptive-tutoring workflow.
     """
     if not NOTES_BASE.exists():
         return []
@@ -86,7 +84,7 @@ def list_study_files() -> list[str]:
 @mcp.tool()
 def read_study_file(filename: str) -> str:
     """
-    Read the full content of a study note file.
+    Read the full content of a markdown file from the configured directory.
 
     Args:
         filename: The filename to read, exactly as returned by
@@ -94,10 +92,9 @@ def read_study_file(filename: str) -> str:
                   'python/variables.md'
 
     Returns:
-        The full text content of the file.
-        Returns an error string if the file doesn't exist or
-        the path is invalid, never raises an exception, so the
-        agent can handle the error gracefully.
+        The file contents as plain text. If the file is missing or the
+        requested path is invalid, returns an error string instead of
+        raising an exception so the caller can handle it gracefully.
     """
     file_path = NOTES_BASE / filename
 
@@ -135,22 +132,22 @@ def read_study_file(filename: str) -> str:
 @mcp.tool()
 def search_notes(query: str) -> list[dict]:
     """
-    Search across all study notes for a keyword or phrase.
+    Search the configured markdown directory for a keyword or phrase.
 
-    Performs case-insensitive substring search across all .md files.
-    Returns matching lines with their file and line number context.
+    Performs a case-insensitive substring search across all .md files and
+    returns matching lines with file and line-number context.
 
     Args:
         query: The search term. Case-insensitive.
                Examples: 'closure', 'nonlocal', 'def make_'
 
     Returns:
-        List of matches, each with keys:
+        A list of matches with keys:
             'file':        relative filename
             'line_number': 1-based line number
-            'line':        the matching line text (stripped)
-        Maximum 20 results to avoid overwhelming the context window.
-        Empty list if no matches found.
+            'line':        matching line text (trimmed)
+        The result is capped at 20 matches to avoid overwhelming the
+        context window. Returns an empty list when no matches are found.
     """
     if not NOTES_BASE.exists():
         return []
@@ -191,19 +188,19 @@ def search_notes(query: str) -> list[dict]:
 @mcp.resource("notes://index")
 def get_notes_index() -> str:
     """
-    Index of all available study materials.
+    Optional index of files in the configured markdown directory.
 
-    Returns a formatted Markdown summary showing all files
-    and their sizes. Agents can read this resource to get
-    an overview without loading every file.
+    Returns a formatted Markdown summary showing the available files and
+    their sizes. This is a compatibility utility and is not part of the
+    active adaptive-tutoring flow.
 
     URI: notes://index
     """
     files = list_study_files()
     if not files:
-        return "# Study Materials Index\n\nNo study materials found."
+        return "# Markdown Index\n\nNo files found."
 
-    lines = ["# Study Materials Index\n"]
+    lines = ["# Markdown Index\n"]
     for filename in files:
         file_path = NOTES_BASE / filename
         try:

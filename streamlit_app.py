@@ -1,30 +1,24 @@
 """
 streamlit_app.py
 
-Streamlit web interface for the Learning Accelerator.
+Streamlit front-end for the adaptive learning system.
 
-Runs the same LangGraph graph as main.py, only the I/O mechanism
-changes. Instead of terminal input/output, the app uses Streamlit
-widgets and session state.
+The UI runs the same LangGraph workflow as the CLI entry point, but
+provides browser-based chat, session management, and checkpoint-backed
+resume behavior. The graph still owns the learning flow, while the UI is
+responsible for surfacing the current topic, transcript, quiz steps, and
+coaching state.
 
 Run:
     streamlit run streamlit_app.py
 
-Architecture:
-    The app is a state machine with six screens:
-    GOAL_INPUT → ROADMAP_APPROVAL → EXPLAINING → QUIZZING → COACHING → COMPLETE
-
-    A separate graph instance (ui_graph) is compiled with
-    interrupt_before=["quiz_generator"] so the graph pauses before the
-    quiz step and returns control to Streamlit. The UI handles quiz I/O
-    directly (calling generate_questions and grade_answer), then injects
-    the QuizResult into the checkpoint via graph.update_state() and
-    resumes execution from progress_coach onward.
-
-    This means:
-    - Zero changes to quiz_generator_node or run_quiz()
-    - The terminal interface (main.py) is completely unaffected
-    - The LangGraph graph code is identical, only I/O changes
+Notes:
+    - The browser UI is session-aware and can switch between multiple
+      learning goals/topics.
+    - Quiz handling is still coordinated by the graph and the quiz node,
+      while the Streamlit layer captures user input and restores state.
+    - The app does not rely on a fixed six-screen state machine in the UI
+      layer; the UI simply reflects the current graph state.
 """
 
 import asyncio
