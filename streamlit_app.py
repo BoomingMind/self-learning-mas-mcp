@@ -27,7 +27,7 @@ Architecture:
     - The LangGraph graph code is identical, only I/O changes
 """
 
-import os
+import asyncio
 import sys
 from pathlib import Path
 from typing import Any
@@ -47,14 +47,8 @@ from graph.workflow import build_graph
 from graph.state import initial_state, StudyRoadmap, QuizResult, QuizQuestion
 from observability.langfuse_setup import get_langfuse_config, flush_langfuse
 from agents.quiz_generator import generate_questions, grade_answer
-
-
-# Streamlit may be launched from a directory other than the repository root.
-# Keep the UI's checkpoint and note paths anchored to this application.
-os.environ.setdefault(
-    "NOTES_PATH",
-    str(PROJECT_ROOT / "study_materials" / "sample_notes"),
-)
+from agents.explainer import _run_explainer_agent
+from model_config import configured_model
 
 
 # ── Build a UI-specific graph with interrupt_before=["quiz_generator"] ────────
@@ -94,6 +88,9 @@ def init_state():
         "coaching_message": "",
         "error": None,
         "goal": "",
+        "explainer_turns": [],
+        "model_provider": "ollama",
+        "model_name": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -187,6 +184,9 @@ def new_session():
         "coaching_message": "",
         "error": None,
         "goal": "",
+        "explainer_turns": [],
+        "model_provider": "ollama",
+        "model_name": "",
     }
     for key, value in defaults.items():
         st.session_state[key] = value
@@ -194,7 +194,7 @@ def new_session():
 
 # ── Graph interaction ─────────────────────────────────────────────────────────
 
-def start_session(goal: str):
+def start_session(goal: str, model_provider: str = "ollama", model_name: str = ""):
     """
     Start a new session. Runs: curriculum_planner → human_approval (interrupt).
     """
@@ -203,8 +203,14 @@ def start_session(goal: str):
     st.session_state.session_id = session_id
     st.session_state.graph_config = config
     st.session_state.goal = goal
+    st.session_state.model_provider = model_provider
+    st.session_state.model_name = model_name
 
-    state = initial_state(goal, session_id)
+    state = initial_state(
+        goal, session_id,
+        model_provider=model_provider,
+        model_name=model_name,
+    )
 
     try:
         with st.spinner("Building your study roadmap..."):
@@ -270,23 +276,7 @@ def approve_roadmap(approved: bool):
     st.session_state.topic_title = title
     st.session_state.topic_description = desc
 
-    # Generate quiz questions now
-    try:
-        with st.spinner("Generating quiz questions..."):
-            questions = generate_questions(title, explanation, n=3)
-    except Exception as exc:
-        st.session_state.error = str(exc)
-        return
-
-    if not questions:
-        st.session_state.error = "The quiz agent returned no questions."
-        return
-
-    st.session_state.quiz_questions = questions
-    st.session_state.current_question_idx = 0
-    st.session_state.graded_answers = []
-    st.session_state.current_quiz_missing_concepts = []
-
+    # Keep the learner in the Explainer; quiz generation is explicit.
     go_to("EXPLAINING")
 
 
@@ -346,30 +336,13 @@ def advance_after_quiz(quiz_result: QuizResult):
         go_to("COMPLETE")
         return
 
-    # More topics, graph paused before next quiz_generator
-    # Extract explanation for the next topic from result messages
+    # More topics: show the next explanation before generating a quiz.
     explanation = extract_explanation(messages)
     st.session_state.explanation = explanation
 
     title, desc = get_topic_info(result, new_idx)
     st.session_state.topic_title = title
     st.session_state.topic_description = desc
-
-    try:
-        with st.spinner("Generating quiz questions..."):
-            questions = generate_questions(title, explanation, n=3)
-    except Exception as exc:
-        st.session_state.error = str(exc)
-        return
-
-    if not questions:
-        st.session_state.error = "The quiz agent returned no questions."
-        return
-
-    st.session_state.quiz_questions = questions
-    st.session_state.current_question_idx = 0
-    st.session_state.graded_answers = []
-    st.session_state.current_quiz_missing_concepts = []
 
     go_to("EXPLAINING")
 
@@ -380,8 +353,8 @@ def screen_goal_input():
     st.title("🎓 Learning Accelerator")
     st.markdown(
         "Enter a learning goal and the system will build a personalised "
-        "study plan, explain each topic using your notes, and quiz you "
-        "as you go, all running locally with Ollama."
+        "study plan, explain each topic adaptively, and quiz you "
+        "as you go with the selected model and optional remote tools."
     )
 
     with st.form("goal_form"):
@@ -389,13 +362,30 @@ def screen_goal_input():
             "What do you want to learn?",
             placeholder="e.g. Learn Python closures and decorators from scratch",
         )
+        provider = st.selectbox(
+            "Model provider",
+            ["ollama", "openrouter"],
+            key="selected_model_provider",
+            format_func=lambda value: value.title(),
+        )
+        configured = configured_model(provider)
+        options = [configured] if configured else ["(no model configured)"]
+        model = st.selectbox(
+            "Model",
+            options,
+            key=f"selected_model_{provider}",
+            help="Configured from your .env file.",
+        )
         submitted = st.form_submit_button("Build Study Plan →", type="primary")
 
     if submitted:
         if not goal.strip():
             st.error("Please enter a learning goal.")
         else:
-            start_session(goal.strip())
+            if not configured:
+                st.error(f"No model is configured for {provider}.")
+            else:
+                start_session(goal.strip(), provider, model)
             st.rerun()
 
     if st.session_state.error:
@@ -464,9 +454,58 @@ def screen_explaining():
         st.warning("No explanation available, starting quiz with topic context.")
 
     st.markdown("---")
+    with st.form("explainer_follow_up"):
+        follow_up = st.text_area(
+            "Ask a follow-up",
+            placeholder="Ask for a simpler explanation, example, or more detail...",
+        )
+        ask = st.form_submit_button("Ask Explainer")
+    if ask:
+        if not follow_up.strip():
+            st.warning("Please enter a follow-up question.")
+        else:
+            try:
+                with st.spinner("Adapting the explanation..."):
+                    _, response = asyncio.run(_run_explainer_agent(
+                        st.session_state.topic_title,
+                        st.session_state.topic_description,
+                        st.session_state.session_id or "unknown",
+                        follow_up.strip(),
+                        st.session_state.model_provider,
+                        st.session_state.model_name,
+                    ))
+                st.session_state.explanation = message_text(response.content)
+                st.session_state.explainer_turns.append({
+                    "question": follow_up.strip(),
+                    "response": st.session_state.explanation,
+                })
+                st.rerun()
+            except Exception as exc:
+                st.session_state.error = str(exc)
+                st.rerun()
+    for turn in st.session_state.explainer_turns:
+        with st.expander(f"You asked: {turn['question']}"):
+            st.markdown(turn["response"])
+
+    st.markdown("---")
     st.markdown(f"**Ready to test your knowledge of *{st.session_state.topic_title}*?**")
 
     if st.button("Start Quiz →", type="primary"):
+        try:
+            with st.spinner("Generating a short adaptive quiz..."):
+                st.session_state.quiz_questions = generate_questions(
+                    st.session_state.topic_title,
+                    st.session_state.explanation,
+                    n=3,
+                    model_provider=st.session_state.model_provider,
+                    model_name=st.session_state.model_name,
+                )
+        except Exception as exc:
+            st.session_state.error = str(exc)
+            st.rerun()
+        st.session_state.current_question_idx = 0
+        st.session_state.graded_answers = []
+        st.session_state.current_quiz_missing_concepts = []
         st.session_state.coaching_message = ""
         go_to("QUIZZING")
         st.rerun()
@@ -519,7 +558,11 @@ def screen_quizzing():
 
             try:
                 with st.spinner("Grading your answer..."):
-                    grade = grade_answer(question_text, expected, user_answer)
+                    grade = grade_answer(
+                        question_text, expected, user_answer,
+                        model_provider=st.session_state.model_provider,
+                        model_name=st.session_state.model_name,
+                    )
             except Exception as exc:
                 st.session_state.error = str(exc)
                 st.rerun()

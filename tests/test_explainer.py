@@ -10,6 +10,8 @@ Run: python -m pytest tests/test_explainer.py -v
 """
 
 from graph.state import StudyRoadmap, Topic, initial_state, get_current_topic
+from agents.explainer import determine_explainer_status
+from graph.workflow import route_after_explainer
 
 
 class TestGetCurrentTopic:
@@ -40,3 +42,34 @@ class TestGetCurrentTopic:
     def test_returns_none_without_roadmap(self):
         state = initial_state("test", "session-1")
         assert get_current_topic(state) is None
+
+
+class TestInteractiveExplainerPolicy:
+    def test_explicit_quiz_request_routes_to_quiz(self):
+        status, requested, awaiting = determine_explainer_status("Quiz me now")
+        assert (status, requested, awaiting) == ("READY_FOR_QUIZ", True, False)
+        assert route_after_explainer({
+            "explainer_status": status,
+            "quiz_requested": requested,
+        }) == "quiz_generator"
+
+    def test_confusion_requests_remediation(self):
+        status, requested, awaiting = determine_explainer_status(
+            "I am confused about the example"
+        )
+        assert status == "NEEDS_REMEDIATION"
+        assert requested is False
+        assert awaiting is False
+
+    def test_understanding_asks_for_approval(self):
+        status, requested, awaiting = determine_explainer_status(
+            "That makes sense", iterations=1
+        )
+        assert status == "AWAITING_QUIZ_APPROVAL"
+        assert requested is False
+        assert awaiting is True
+
+    def test_declining_approval_stays_in_explainer(self):
+        assert determine_explainer_status(
+            "Explain more first", awaiting_approval=True
+        ) == ("CONTINUE", False, False)

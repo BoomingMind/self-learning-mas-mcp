@@ -17,14 +17,12 @@ from datetime import datetime, timezone
 
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
-from langchain_ollama import ChatOllama
 
 from graph.state import get_latest_quiz_result
 from mcp_client import call_tool
+from model_config import build_chat_model
 
 
-MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 PASS_THRESHOLD = 0.5
 
 # A2A service URL, read from env so it's configurable
@@ -47,13 +45,12 @@ Never be discouraging. A low score means "more practice needed", not "you failed
 """
 
 
-def get_coaching_message(topic: str, score: float, weak_areas: list[str]) -> dict:
+def get_coaching_message(topic: str, score: float, weak_areas: list[str], model_provider: str = "ollama", model_name: str = "") -> dict:
     """Ask the LLM for a personalised coaching message."""
-    llm = ChatOllama(
-        model=MODEL_NAME,
-        base_url=OLLAMA_BASE_URL,
+    llm = build_chat_model(
+        provider=model_provider, model=model_name or None,
         temperature=0.4,
-        format="json",
+        json_mode=True,
     )
 
     context = {
@@ -217,7 +214,10 @@ def progress_coach_node(state: dict) -> dict:
         print(f"[Progress Coach] Weak areas: {', '.join(latest.weak_areas)}")
 
     # ── Get coaching message ──────────────────────────────────────────
-    coaching = get_coaching_message(latest.topic, score, latest.weak_areas)
+    coaching = get_coaching_message(
+        latest.topic, score, latest.weak_areas,
+        state.get("model_provider", "ollama"), state.get("model_name", ""),
+    )
 
     # ── Update topic status ───────────────────────────────────────────
     topics = roadmap.get("topics", []) if isinstance(roadmap, dict) else roadmap.topics
@@ -250,15 +250,13 @@ def progress_coach_node(state: dict) -> dict:
         "status":     status,
         "timestamp":  datetime.now(timezone.utc).isoformat(),
     })
-    asyncio.run(call_tool(
-        "memory",
-        "memory_set",
-        {
-            "session_id": session_id,
-            "key": f"progress_topic_{idx}",
-            "value": progress_data,
-        },
-    ))
+    try:
+        asyncio.run(call_tool(
+            "memory", "memory_set",
+            {"session_id": session_id, "key": f"progress_topic_{idx}", "value": progress_data},
+        ))
+    except Exception as error:
+        print(f"[Progress Coach] Memory unavailable; continuing: {error}")
 
     # ── Print coaching message ────────────────────────────────────────
     print(f"\n{'─'*60}")
@@ -306,6 +304,10 @@ def progress_coach_node(state: dict) -> dict:
     return {
         "roadmap":               roadmap,
         "current_topic_index":   next_idx,
+        "explainer_status": "CONTINUE",
+        "explainer_iterations": 0,
+        "quiz_requested": False,
+        "awaiting_quiz_approval": False,
         "messages":              [AIMessage(content=coaching["summary"])],
         "error":                 None,
     }

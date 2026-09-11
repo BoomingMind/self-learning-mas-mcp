@@ -16,12 +16,15 @@ It demonstrates the foundational pattern every agent follows:
 
 import json
 import os
+import asyncio
 
 from langchain_core.messages import HumanMessage
 from langchain.agents import create_agent
 from langchain_ollama import ChatOllama
 
 from graph.state import StudyRoadmap, Topic
+from mcp_client import call_tool
+from model_config import build_chat_model
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31,8 +34,25 @@ from graph.state import StudyRoadmap, Topic
 # Defaults to qwen2.5:7b which works on 8GB VRAM.
 # ─────────────────────────────────────────────────────────────────────────────
 
-MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+def should_research_goal(goal: str) -> bool:
+    return any(term in goal.lower() for term in (
+        "latest", "current", "2025", "2026", "framework", "library",
+        "prerequisite", "resources", "roadmap",
+    ))
+
+
+def planner_research(goal: str) -> str:
+    if not should_research_goal(goal):
+        return ""
+    try:
+        result = asyncio.run(call_tool(
+            "tavily", "search_web",
+            {"query": f"{goal} official prerequisites learning resources", "max_results": 3},
+        ))
+        return f"\nUntrusted research context:\n{json.dumps(result)[:6000]}"
+    except Exception as error:
+        print(f"[Curriculum Planner] Web research unavailable: {error}")
+        return ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -88,7 +108,7 @@ Rules:
 # and makes it easier to test with different configurations.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_planner_llm() -> ChatOllama:
+def build_planner_llm(provider: str = "ollama", model: str = ""):
     """
     Create the Ollama LLM client for the Curriculum Planner.
 
@@ -101,18 +121,17 @@ def build_planner_llm() -> ChatOllama:
     produce output that isn't valid JSON. This is a hard constraint
     at the inference level, not just a prompt instruction.
     """
-    return ChatOllama(
-        model=MODEL_NAME,
-        base_url=OLLAMA_BASE_URL,
+    return build_chat_model(
+        provider=provider, model=model or None,
         temperature=0.1,
-        format="json",
+        json_mode=True,
     )
 
 
-def build_planner_agent():
+def build_planner_agent(provider: str = "ollama", model: str = ""):
     """Build the LangChain agent used to create a roadmap."""
     return create_agent(
-        model=build_planner_llm(),
+        model=build_planner_llm(provider, model),
         system_prompt=PLANNER_SYSTEM_PROMPT,
         name="curriculum_planner",
     )
@@ -216,12 +235,18 @@ def curriculum_planner_node(state: dict) -> dict:
     print(f"\n[Curriculum Planner] Building roadmap for: '{goal}'")
 
     messages = [
-        HumanMessage(content=f"Create a study roadmap for this learning goal: {goal}"),
+        HumanMessage(content=(
+            f"Create a study roadmap for this learning goal: {goal}"
+            f"{planner_research(goal)}"
+        )),
     ]
 
-    print(f"[Curriculum Planner] Calling {MODEL_NAME}...")
+    print(f"[Curriculum Planner] Calling {state.get('model_provider', 'ollama')}")
     try:
-        result = build_planner_agent().invoke({"messages": messages})
+        result = build_planner_agent(
+            state.get("model_provider", "ollama"),
+            state.get("model_name", ""),
+        ).invoke({"messages": messages})
         response = result["messages"][-1]
     except Exception as e:
         print(f"[Curriculum Planner] LLM call failed: {e}")

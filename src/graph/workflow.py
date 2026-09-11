@@ -66,6 +66,15 @@ def route_after_coach(state: dict) -> str:
     return "explainer"
 
 
+def route_after_explainer(state: dict) -> str:
+    if (
+        state.get("quiz_requested", False)
+        and state.get("explainer_status") == "READY_FOR_QUIZ"
+    ):
+        return "quiz_generator"
+    return "end"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Graph construction
 # ─────────────────────────────────────────────────────────────────────────────
@@ -104,7 +113,6 @@ def build_graph(
     # ── Static edges ──────────────────────────────────────────────────
     builder.add_edge(START, "curriculum_planner")
     builder.add_edge("curriculum_planner", "human_approval")
-    builder.add_edge("explainer", "quiz_generator")
     builder.add_edge("quiz_generator", "progress_coach")
 
     # ── Conditional edges ─────────────────────────────────────────────
@@ -119,6 +127,12 @@ def build_graph(
     )
 
     # After coaching: next topic or done
+    builder.add_conditional_edges(
+        "explainer",
+        route_after_explainer,
+        {"quiz_generator": "quiz_generator", "end": END},
+    )
+
     builder.add_conditional_edges(
         "progress_coach",
         route_after_coach,

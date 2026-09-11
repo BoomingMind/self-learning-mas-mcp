@@ -22,6 +22,7 @@ from typing import Annotated, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
+from model_config import configured_model, configured_provider
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -220,6 +221,8 @@ class AgentState(TypedDict):
     # Unique ID for this study session. Used as the LangGraph thread_id
     # (for checkpointing) and as the key for MCP memory storage.
     session_id: str
+    model_provider: str
+    model_name: str
 
     # ── User's learning goal ──────────────────────────────────────────
     # Set at session start. Never changes during a session.
@@ -253,10 +256,13 @@ class AgentState(TypedDict):
     # schedule review sessions.
     weak_areas: list[str]
 
-    # ── File system path ──────────────────────────────────────────────
-    # Where to find the student's study notes.
-    # Passed to MCP filesystem tools.
+    # Legacy compatibility field for older checkpoints. It is not used by the
+    # active learning workflow.
     study_materials_path: str
+    explainer_status: str
+    explainer_iterations: int
+    quiz_requested: bool
+    awaiting_quiz_approval: bool
 
     # ── Error handling ────────────────────────────────────────────────
     # If a node fails, it writes the error message here instead of
@@ -276,7 +282,9 @@ class AgentState(TypedDict):
 def initial_state(
     goal: str,
     session_id: str,
-    study_materials_path: str = "study_materials/sample_notes",
+    study_materials_path: str = "",
+    model_provider: str | None = None,
+    model_name: str | None = None,
 ) -> dict:
     """
     Create the initial state for a new study session.
@@ -291,8 +299,8 @@ def initial_state(
         session_id:           Unique ID for this session.
                               Used as the LangGraph thread_id.
                               Format: short UUID or human-readable string.
-        study_materials_path: Path to the directory containing .md notes.
-                              Defaults to the sample notes we created.
+        study_materials_path: Deprecated compatibility value. It is not used
+                              by the active learning workflow.
 
     Returns:
         A dict matching the AgentState schema with all fields initialized.
@@ -300,6 +308,8 @@ def initial_state(
     return {
         "messages": [],                     # No messages yet
         "session_id": session_id,
+        "model_provider": model_provider or configured_provider(),
+        "model_name": model_name or configured_model(model_provider),
         "goal": goal,
         "roadmap": None,                    # Planner hasn't run yet
         "approved": False,                  # User hasn't approved yet
@@ -307,6 +317,10 @@ def initial_state(
         "quiz_results": [],                 # No quizzes yet
         "weak_areas": [],                   # No weak areas identified yet
         "study_materials_path": study_materials_path,
+        "explainer_status": "CONTINUE",
+        "explainer_iterations": 0,
+        "quiz_requested": False,
+        "awaiting_quiz_approval": False,
         "error": None,                      # No errors
     }
 

@@ -19,7 +19,7 @@ def server_config() -> dict[str, dict[str, object]]:
             "args": [str(servers_dir / f"{name}_server.py")],
             "env": dict(os.environ),
         }
-        for name in ("filesystem", "memory")
+        for name in ("memory", "tavily", "onecompiler")
     }
 
 

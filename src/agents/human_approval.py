@@ -84,9 +84,11 @@ def human_approval_node(state: dict) -> dict:
         "roadmap": roadmap,
         "goal": state.get("goal", ""),
         "session_id": state.get("session_id", ""),
+        "model_provider": state.get("model_provider", "ollama"),
+        "model_name": state.get("model_name", ""),
         "current_topic_index": state.get("current_topic_index", 0),
         "quiz_results": state.get("quiz_results", []),
         "weak_areas": state.get("weak_areas", []),
-        "study_materials_path": state.get("study_materials_path", "study_materials/sample_notes"),
+        "study_materials_path": state.get("study_materials_path", ""),
         "error": None,
     }

@@ -10,10 +10,18 @@ and independent MCP servers.
   LangGraph nodes invoke those agents as workflow steps.
 - The Explainer binds the LangChain chat model to tools discovered from MCP
   servers; it does not import server functions for production execution.
-- `filesystem_server.py` and `memory_server.py` are standalone FastMCP
-  processes using JSON-RPC over stdio.
-- `MultiServerMCPClient` starts both servers, keeps their sessions open for
-  the agent turn, and exposes their MCP tools as LangChain tools.
+- The Explainer is an interactive tutor that selectively uses learner memory,
+  Tavily web search, and remote OneCompiler execution. Study notes are not
+  required by the core workflow.
+- Existing A2A behavior remains controlled by `USE_A2A_QUIZ` and
+  `USE_STUDY_BUDDY`.
+- `memory_server.py`, `tavily_server.py`, and `onecompiler_server.py` are
+  standalone FastMCP processes using JSON-RPC over stdio.
+- `MultiServerMCPClient` starts only the active memory, Tavily, and
+  OneCompiler servers, keeps their sessions open for the agent turn, and
+  exposes their MCP tools as LangChain tools. The legacy filesystem server
+  remains available for compatibility tests but is not part of the learning
+  workflow.
 
 Install dependencies with `pip install -r requirements.txt`, then run:
 

@@ -29,7 +29,11 @@ from graph.state import (
     get_latest_quiz_result,
     session_is_complete,
 )
-from agents.quiz_generator import generate_questions, grade_answer
+from agents.quiz_generator import (
+    generate_questions,
+    grade_answer,
+    _external_quiz_context,
+)
 from agents.progress_coach import progress_coach_node, PASS_THRESHOLD
 from graph.workflow import route_after_coach
 
@@ -85,6 +89,38 @@ class TestGenerateQuestions:
 
         result = generate_questions("Topic", "explanation", n=2)
         assert len(result) == 1  # fallback
+
+    @patch("agents.quiz_generator.call_tool")
+    def test_stable_topic_does_not_search_or_execute(self, mock_call_tool):
+        """Stable quiz requests should not incur external tool calls."""
+        assert _external_quiz_context("Python lists", "A stable explanation") == ""
+        mock_call_tool.assert_not_called()
+
+    @patch("agents.quiz_generator.call_tool")
+    def test_current_topic_uses_tavily(self, mock_call_tool):
+        """Current/version-sensitive topics should use selective web research."""
+        async def search(*args, **kwargs):
+            return {"results": [{"url": "https://docs.example/current"}]}
+
+        mock_call_tool.side_effect = search
+        context = _external_quiz_context("Latest Python version", "version changes")
+        assert "https://docs.example/current" in context
+        mock_call_tool.assert_called_once()
+        assert mock_call_tool.call_args.args[0:2] == ("tavily", "search_web")
+
+    @patch("agents.quiz_generator.call_tool")
+    def test_code_topic_uses_remote_onecompiler(self, mock_call_tool):
+        """Code-backed quizzes should verify examples remotely, never locally."""
+        async def execute(*args, **kwargs):
+            return {"stdout": "2"}
+
+        mock_call_tool.side_effect = execute
+        context = _external_quiz_context(
+            "Python output",
+            "```python\nprint(1 + 1)\n```",
+        )
+        assert "stdout" in context
+        assert mock_call_tool.call_args.args[0:2] == ("onecompiler", "execute_code")
 
 
 class TestGradeAnswer:
