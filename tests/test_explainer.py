@@ -10,7 +10,10 @@ Run: python -m pytest tests/test_explainer.py -v
 """
 
 from graph.state import StudyRoadmap, Topic, initial_state, get_current_topic
-from agents.explainer import determine_explainer_status
+from agents.explainer import (
+    classify_explainer_status,
+    determine_explainer_status,
+)
 from graph.workflow import route_after_explainer
 
 
@@ -73,3 +76,35 @@ class TestInteractiveExplainerPolicy:
         assert determine_explainer_status(
             "Explain more first", awaiting_approval=True
         ) == ("CONTINUE", False, False)
+
+    def test_llm_status_classifier_uses_model_decision(self, monkeypatch):
+        class Response:
+            content = '{"status":"NEEDS_REMEDIATION","quiz_requested":false,"awaiting_approval":false}'
+
+        class Model:
+            def invoke(self, prompt):
+                return Response()
+
+        monkeypatch.setattr("agents.explainer.build_chat_model", lambda *args, **kwargs: Model())
+        assert classify_explainer_status(
+            "Closures",
+            "I think the inner function copies the variable.",
+            "Let us clarify how closures retain bindings.",
+            "CONTINUE",
+            False,
+            1,
+            "openrouter",
+        ) == ("NEEDS_REMEDIATION", False, False)
+
+    def test_explicit_quiz_request_remains_hard_safeguard(self, monkeypatch):
+        class Response:
+            content = '{"status":"CONTINUE","quiz_requested":false,"awaiting_approval":false}'
+
+        class Model:
+            def invoke(self, prompt):
+                return Response()
+
+        monkeypatch.setattr("agents.explainer.build_chat_model", lambda *args, **kwargs: Model())
+        assert classify_explainer_status(
+            "Closures", "Quiz me now", "Explanation", "CONTINUE", False, 1, "openrouter"
+        ) == ("READY_FOR_QUIZ", True, False)

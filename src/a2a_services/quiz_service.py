@@ -25,6 +25,7 @@ Submit a task:
 import asyncio
 import json
 import sys
+import uuid
 from pathlib import Path
 
 # Ensure src/ is on path when running as script
@@ -125,10 +126,7 @@ class QuizAgentExecutor(AgentExecutor):
         """Process an incoming quiz task."""
 
         # ── Parse request ─────────────────────────────────────────────
-        request_text = ""
-        for part in context.current_request.params.message.parts:
-            if isinstance(part, TextPart):
-                request_text += part.text
+        request_text = context.get_user_input()
 
         try:
             request_data = json.loads(request_text)
@@ -202,6 +200,7 @@ class QuizAgentExecutor(AgentExecutor):
         # ── Emit result ───────────────────────────────────────────────
         await event_queue.enqueue_event(
             Message(
+                message_id=str(uuid.uuid4()),
                 role="agent",
                 parts=[TextPart(text=json.dumps(result, indent=2))],
             )

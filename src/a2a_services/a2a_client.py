@@ -71,17 +71,18 @@ def send_task(
     payload = {
         "jsonrpc": "2.0",
         "id":      1,
-        "method":  "tasks/send",
+        "method":  "message/send",
         "params": {
-            "id":      task_id or str(uuid.uuid4()),
             "message": {
+                "messageId": task_id or str(uuid.uuid4()),
+                "kind": "message",
                 "role":  "user",
                 "parts": [{"type": "text", "text": message_text}],
             },
         },
     }
 
-    url = f"{base_url.rstrip('/')}/tasks/send"
+    url = base_url.rstrip("/")
     try:
         response = httpx.post(url, json=payload, timeout=timeout)
         response.raise_for_status()
@@ -98,6 +99,14 @@ def send_task(
                         return json.loads(part["text"])
                     except json.JSONDecodeError:
                         return {"text": part["text"]}
+
+        # Current A2A message/send responses return a Message directly.
+        for part in result.get("parts", []):
+            if part.get("kind") == "text" or part.get("type") == "text":
+                try:
+                    return json.loads(part["text"])
+                except json.JSONDecodeError:
+                    return {"text": part["text"]}
 
         # Fallback: check status message
         status = result.get("status", {})

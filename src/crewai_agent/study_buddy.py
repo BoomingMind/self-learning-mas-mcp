@@ -23,6 +23,7 @@ Agent Card:
 import asyncio
 import json
 import os
+import uuid
 
 import uvicorn
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -44,6 +45,7 @@ from pydantic import BaseModel, Field
 
 MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "ollama").lower()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -128,11 +130,17 @@ def build_study_buddy_crew(
     """
     topic_analyser = TopicAnalyserTool()
 
-    # Configure CrewAI to use Ollama
-    llm = LLM(
-        model=f"ollama/{MODEL_NAME}",
-        base_url=OLLAMA_BASE_URL,
-    )
+    if MODEL_PROVIDER == "openrouter":
+        llm = LLM(
+            model=f"openrouter/{os.getenv('OPENROUTER_MODEL', MODEL_NAME)}",
+            api_key=os.getenv("OPENROUTER_API_KEY"),
+            base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        )
+    else:
+        llm = LLM(
+            model=f"ollama/{MODEL_NAME}",
+            base_url=OLLAMA_BASE_URL,
+        )
 
     study_buddy_agent = Agent(
         role="Study Buddy",
@@ -244,10 +252,7 @@ class StudyBuddyExecutor(AgentExecutor):
         """Handle an incoming A2A study assistance task."""
 
         # ── Parse request ─────────────────────────────────────────────
-        request_text = ""
-        for part in context.current_request.params.message.parts:
-            if isinstance(part, TextPart):
-                request_text += part.text
+        request_text = context.get_user_input()
 
         try:
             request_data = json.loads(request_text)
@@ -299,6 +304,7 @@ class StudyBuddyExecutor(AgentExecutor):
         # ── Emit result ───────────────────────────────────────────────
         await event_queue.enqueue_event(
             Message(
+                message_id=str(uuid.uuid4()),
                 role="agent",
                 parts=[TextPart(text=json.dumps(result, indent=2))],
             )

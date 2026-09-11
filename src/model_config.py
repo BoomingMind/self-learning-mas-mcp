@@ -46,10 +46,9 @@ def build_chat_model(
             ),
             "temperature": temperature,
         }
-        if json_mode:
-            kwargs["model_kwargs"] = {
-                "response_format": {"type": "json_object"},
-            }
+        # OpenRouter models do not consistently support the OpenAI
+        # structured-output parameter. Callers already provide JSON-only
+        # instructions and validate/normalize the response themselves.
         return ChatOpenAI(**kwargs)
 
     if selected_provider != "ollama":

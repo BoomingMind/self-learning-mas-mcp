@@ -21,6 +21,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -40,6 +41,7 @@ from mcp_servers.memory_server import (
     get_session_summary,
     _store,   # direct access for test cleanup
 )
+from mcp_servers.onecompiler_server import execute_code
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -198,6 +200,34 @@ class TestGetNotesIndex:
         result = get_notes_index()
         # closures.md was created in Batch 1
         assert "closures.md" in result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OneCompiler server tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestOneCompilerServer:
+    """Verify remote execution request construction without running code locally."""
+
+    @patch("mcp_servers.onecompiler_server.httpx.post")
+    def test_rapidapi_uses_supported_execution_endpoint(self, mock_post, monkeypatch):
+        monkeypatch.setenv("ONECOMPILER_API_KEY", "test-key")
+        monkeypatch.setenv("ONECOMPILER_PROVIDER", "rapidapi")
+        response = MagicMock()
+        response.json.return_value = {"stdout": "5"}
+        response.raise_for_status = MagicMock()
+        mock_post.return_value = response
+
+        result = execute_code("python", "print(2 + 3)")
+
+        assert result["stdout"] == "5"
+        request = mock_post.call_args
+        assert request.args[0] == (
+            "https://onecompiler-1.p.rapidapi.com/api/code/exec"
+        )
+        assert request.kwargs["headers"]["x-rapidapi-host"] == (
+            "onecompiler-1.p.rapidapi.com"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

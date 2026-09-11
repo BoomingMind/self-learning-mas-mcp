@@ -134,6 +134,31 @@ class TestSendTask:
 
         result = send_task("http://localhost:9001", json.dumps({"topic": "Test"}))
         assert result["status"] == "questions_ready"
+        request = mock_post.call_args.kwargs["json"]
+        assert request["method"] == "message/send"
+        assert request["params"]["message"]["messageId"]
+
+    @patch("a2a_services.a2a_client.httpx.post")
+    def test_parses_current_message_response(self, mock_post):
+        """Current A2A JSON-RPC responses return a Message directly."""
+        from a2a_services.a2a_client import send_task
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "result": {
+                "kind": "message",
+                "messageId": "response-1",
+                "parts": [{
+                    "kind": "text",
+                    "text": json.dumps({"status": "questions_ready"}),
+                }],
+            }
+        }
+        mock_response.raise_for_status = MagicMock()
+        mock_post.return_value = mock_response
+
+        result = send_task("http://localhost:9001", "{}")
+        assert result["status"] == "questions_ready"
 
     @patch("a2a_services.a2a_client.httpx.post")
     def test_returns_error_on_connection_refused(self, mock_post):

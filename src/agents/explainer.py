@@ -1,6 +1,7 @@
 """Interactive adaptive tutor using memory, Tavily, and OneCompiler MCP tools."""
 
 import asyncio
+import json
 import os
 import re
 from contextlib import AsyncExitStack
@@ -15,6 +16,12 @@ from mcp_client import server_config
 from model_config import build_chat_model
 
 MAX_EXPLAINER_ITERATIONS = 6
+STATUS_VALUES = {
+    "CONTINUE",
+    "NEEDS_REMEDIATION",
+    "AWAITING_QUIZ_APPROVAL",
+    "READY_FOR_QUIZ",
+}
 EXPLAINER_SYSTEM_PROMPT = """You are an interactive adaptive tutor. Explain first,
 then respond naturally to follow-ups. Adapt style for simple, deep, debugging,
 comparison, example, or Socratic requests. Use model knowledge for stable facts.
@@ -26,6 +33,18 @@ mention study notes. Cite only URLs returned by Tavily. Remediate confusion,
 deepen demonstrated understanding, and use lightweight checks without turning
 every turn into a quiz. When ready, ask whether the learner wants a short quiz.
 Do not generate the quiz or call another agent."""
+STATUS_CLASSIFIER_PROMPT = """Classify the learner's pedagogical state after an
+interactive tutoring turn. Return ONLY valid JSON with this shape:
+{"status":"CONTINUE|NEEDS_REMEDIATION|AWAITING_QUIZ_APPROVAL|READY_FOR_QUIZ",
+"quiz_requested":true|false,"awaiting_approval":true|false}
+
+Use CONTINUE when the learner needs explanation, asks a follow-up, or declines
+assessment. Use NEEDS_REMEDIATION when the learner is confused or demonstrates
+a misconception. Use AWAITING_QUIZ_APPROVAL only when the learner appears to
+understand and should be invited to take a quiz. Use READY_FOR_QUIZ only when
+the learner explicitly asks to be quizzed or explicitly accepts that invitation.
+Do not infer quiz approval from a general positive statement such as "I get it".
+"""
 
 
 def determine_explainer_status(
@@ -49,6 +68,63 @@ def determine_explainer_status(
     ):
         return "AWAITING_QUIZ_APPROVAL", False, True
     return "CONTINUE", False, False
+
+
+def _parse_status_response(content: str) -> tuple[str, bool, bool] | None:
+    """Parse a tolerant JSON response from the status-classification LLM."""
+    text = content.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    status = str(data.get("status", "")).upper()
+    if status not in STATUS_VALUES:
+        return None
+    requested = bool(data.get("quiz_requested", False))
+    awaiting = bool(data.get("awaiting_approval", False))
+    if status == "READY_FOR_QUIZ":
+        requested, awaiting = True, False
+    elif status == "AWAITING_QUIZ_APPROVAL":
+        requested, awaiting = False, True
+    else:
+        requested = False
+        awaiting = False
+    return status, requested, awaiting
+
+
+def classify_explainer_status(
+        topic_title: str,
+        learner_message: str,
+        explanation: str,
+        previous_status: str,
+        awaiting_approval: bool,
+        iterations: int,
+        model_provider: str,
+        model_name: str = "",
+) -> tuple[str, bool, bool]:
+    """Use the selected LLM to decide the next pedagogical state."""
+    fallback = determine_explainer_status(
+        learner_message, previous_status, awaiting_approval, iterations
+    )
+    if fallback[1]:
+        return fallback
+    try:
+        model = build_chat_model(model_provider, model_name or None, 0.0, json_mode=True)
+        response = model.invoke(
+            f"{STATUS_CLASSIFIER_PROMPT}\n\n"
+            f"Topic: {topic_title}\n"
+            f"Learner message: {learner_message or '(initial explanation)'}\n"
+            f"Latest explanation: {explanation[:4000]}\n"
+            f"Previous status: {previous_status}\n"
+            f"Awaiting approval: {awaiting_approval}\n"
+            f"Explainer iterations: {iterations}"
+        )
+        return _parse_status_response(str(response.content)) or fallback
+    except Exception as error:
+        print(f"[Explainer] Status classification unavailable; using fallback: {error}")
+        return fallback
 
 
 async def _run_explainer_agent(
@@ -92,12 +168,9 @@ def explainer_node(state: dict) -> dict:
          if isinstance(m, HumanMessage) and m.content),
         "",
     )
-    status, requested, awaiting = determine_explainer_status(
-        learner_message,
-        state.get("explainer_status", "CONTINUE"),
-        bool(state.get("awaiting_quiz_approval", False)),
-        int(state.get("explainer_iterations", 0)),
-    )
+    previous_status = state.get("explainer_status", "CONTINUE")
+    awaiting_approval = bool(state.get("awaiting_quiz_approval", False))
+    iterations_before = int(state.get("explainer_iterations", 0))
     try:
         messages, response = asyncio.run(_run_explainer_agent(
             topic.title, topic.description, state.get("session_id", "unknown"),
@@ -106,6 +179,16 @@ def explainer_node(state: dict) -> dict:
         ))
     except Exception as error:
         return {"error": f"Explainer agent failed: {error}"}
+    status, requested, awaiting = classify_explainer_status(
+        topic.title,
+        learner_message,
+        str(response.content),
+        previous_status,
+        awaiting_approval,
+        iterations_before,
+        state.get("model_provider", "ollama"),
+        state.get("model_name", ""),
+    )
     iterations = min(int(state.get("explainer_iterations", 0)) + 1, MAX_EXPLAINER_ITERATIONS)
     if iterations >= MAX_EXPLAINER_ITERATIONS and status == "CONTINUE":
         status, awaiting = "AWAITING_QUIZ_APPROVAL", True
