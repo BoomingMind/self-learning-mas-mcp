@@ -28,6 +28,7 @@ Architecture:
 """
 
 import asyncio
+import copy
 import json
 import sys
 from pathlib import Path
@@ -44,12 +45,17 @@ import uuid
 import streamlit as st
 from langgraph.types import Command
 
-from graph.workflow import build_graph
+from graph.workflow import (
+    build_graph,
+    delete_persisted_session,
+    list_persisted_sessions,
+)
 from graph.state import initial_state, StudyRoadmap, QuizResult, QuizQuestion
 from observability.langfuse_setup import get_langfuse_config, flush_langfuse
 from agents.quiz_generator import generate_questions, grade_answer
 from agents.explainer import _run_explainer_agent, add_learning_resources
 from model_config import configured_model
+from mcp_client import call_tool
 
 
 # ── Build a UI-specific graph with interrupt_before=["quiz_generator"] ────────
@@ -70,6 +76,17 @@ st.set_page_config(
 
 
 # ── Session state initialisation ──────────────────────────────────────────────
+
+SESSION_UI_KEYS = (
+    "screen", "session_id", "graph_config", "roadmap",
+    "current_topic_index", "quiz_questions", "current_question_idx",
+    "graded_answers", "current_quiz_missing_concepts", "quiz_results",
+    "weak_areas", "explanation", "topic_title", "topic_description",
+    "coaching_message", "coaching_encouragement", "coaching_recommendation",
+    "coaching_review_focus", "study_buddy_assistance", "coaching_topic_index",
+    "coaching_topic", "error", "goal", "explainer_turns", "model_provider",
+    "model_name",
+)
 
 def init_state():
     defaults = {
@@ -99,6 +116,9 @@ def init_state():
         "explainer_turns": [],
         "model_provider": "ollama",
         "model_name": "",
+        "learning_sessions": {},
+        "new_goal_mode": False,
+        "postgres_sessions_loaded": False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -108,6 +128,204 @@ init_state()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _copy_graph_config_without_callbacks(value: dict) -> dict:
+    """Copy serializable graph settings while excluding runtime callbacks."""
+    return {
+        config_key: copy.deepcopy(config_value)
+        for config_key, config_value in value.items()
+        if config_key != "callbacks"
+    }
+
+
+def _save_active_session() -> None:
+    """Persist the active UI state so another goal can be opened."""
+    session_id = st.session_state.get("session_id")
+    if not session_id:
+        return
+    record = st.session_state.learning_sessions.setdefault(session_id, {})
+    record["goal"] = st.session_state.get("goal", "")
+    record["screen"] = st.session_state.get("screen", "GOAL_INPUT")
+    snapshot: dict[str, object] = {}
+    for key in SESSION_UI_KEYS:
+        value = st.session_state.get(key)
+        if key == "graph_config" and isinstance(value, dict):
+            # Langfuse callbacks own threads and locks and cannot be copied.
+            # They are recreated when the session is restored.
+            value = _copy_graph_config_without_callbacks(value)
+        else:
+            value = copy.deepcopy(value)
+        snapshot[key] = value
+    record["state"] = snapshot
+
+
+def _persist_explainer_history() -> None:
+    """Write the visible Explainer transcript into the current checkpoint."""
+    config = st.session_state.get("graph_config")
+    if not config or not st.session_state.get("session_id"):
+        return
+    ui_graph.update_state(
+        config,
+        {"explainer_turns": copy.deepcopy(st.session_state.explainer_turns)},
+        as_node="explainer",
+    )
+
+
+def _append_explainer_turn(question: str, response: str) -> None:
+    """Persist a new chat turn in both the UI session and its checkpoint."""
+    turns = list(st.session_state.get("explainer_turns", []))
+    turns.append({"question": question, "response": response})
+    st.session_state.explainer_turns = turns
+    _persist_explainer_history()
+    _save_active_session()
+
+
+def _restore_explainer_history_from_checkpoint() -> None:
+    """Hydrate the visible transcript from the active graph checkpoint."""
+    config = st.session_state.get("graph_config")
+    if not config or not st.session_state.get("session_id"):
+        return
+    snapshot = ui_graph.get_state(config)
+    persisted = snapshot.values.get("explainer_turns", [])
+    if not isinstance(persisted, list):
+        return
+    local = st.session_state.get("explainer_turns", [])
+    if persisted and len(persisted) >= len(local) and persisted != local:
+        st.session_state.explainer_turns = copy.deepcopy(persisted)
+
+
+def _register_active_session() -> None:
+    session_id = st.session_state.session_id
+    st.session_state.learning_sessions.setdefault(session_id, {})
+    _save_active_session()
+
+
+def _restore_session(session_id: str) -> None:
+    """Restore a previously opened goal and its current UI screen."""
+    _save_active_session()
+    saved = st.session_state.learning_sessions[session_id].get("state", {})
+    for key in SESSION_UI_KEYS:
+        if key in saved:
+            if key == "graph_config" and isinstance(saved[key], dict):
+                st.session_state[key] = get_langfuse_config(
+                    session_id,
+                    extra_config=_copy_graph_config_without_callbacks(saved[key]),
+                )
+            else:
+                st.session_state[key] = copy.deepcopy(saved[key])
+    if not st.session_state.topic_title:
+        title, description = get_topic_info(
+            {
+                "roadmap": st.session_state.roadmap,
+                "current_topic_index": st.session_state.current_topic_index,
+            },
+            st.session_state.current_topic_index,
+        )
+        st.session_state.topic_title = title
+        st.session_state.topic_description = description
+    st.session_state.new_goal_mode = False
+    st.session_state.error = None
+
+
+def _remove_session(session_id: str) -> None:
+    """Remove a goal from the sidebar and delete its persisted graph state."""
+    asyncio.run(call_tool(
+        "memory",
+        "memory_delete_session",
+        {"session_id": session_id},
+    ))
+    delete_persisted_session(ui_graph.checkpointer, session_id)
+    st.session_state.learning_sessions.pop(session_id, None)
+
+    if st.session_state.get("session_id") == session_id:
+        st.session_state.session_id = None
+        st.session_state.graph_config = None
+        st.session_state.new_goal_mode = True
+        st.session_state.screen = "GOAL_INPUT"
+
+
+def _screen_for_persisted_state(state: dict) -> str:
+    """Choose the UI screen that can resume a persisted graph state."""
+    roadmap = state.get("roadmap")
+    if roadmap and not state.get("approved", False):
+        return "ROADMAP_APPROVAL"
+    if state.get("coaching_summary"):
+        return "COACHING"
+    topics = roadmap.get("topics", []) if isinstance(roadmap, dict) else []
+    if topics and state.get("current_topic_index", 0) >= len(topics):
+        return "COMPLETE"
+    return "EXPLAINING" if roadmap else "GOAL_INPUT"
+
+
+def _load_postgres_sessions() -> None:
+    """Populate the sidebar from checkpoints created by earlier app runs."""
+    if st.session_state.postgres_sessions_loaded:
+        return
+    persisted = list_persisted_sessions(ui_graph.checkpointer)
+    for session_id, state in persisted.items():
+        if session_id in st.session_state.learning_sessions:
+            continue
+        state["screen"] = _screen_for_persisted_state(state)
+        state["session_id"] = session_id
+        title, description = get_topic_info(
+            state,
+            state.get("current_topic_index", 0),
+        )
+        if not state.get("topic_title"):
+            state["topic_title"] = title
+        if not state.get("topic_description"):
+            state["topic_description"] = description
+        state["coaching_message"] = state.get("coaching_summary", "")
+        state["graph_config"] = _copy_graph_config_without_callbacks(
+            get_langfuse_config(session_id)
+        )
+        st.session_state.learning_sessions[session_id] = {
+            "goal": state.get("goal", "Untitled goal"),
+            "screen": state["screen"],
+            "state": state,
+        }
+    st.session_state.postgres_sessions_loaded = True
+
+
+def render_session_sidebar() -> None:
+    """Render a ChatGPT-style learning-goal switcher."""
+    _save_active_session()
+    with st.sidebar:
+        st.title("Learning goals")
+        if st.button("＋ New goal", use_container_width=True, type="primary"):
+            new_session()
+            st.rerun()
+
+        sessions = st.session_state.learning_sessions
+        if not sessions:
+            st.caption("Create a goal to start a learning session.")
+            return
+
+        session_ids = list(sessions)
+        active_id = st.session_state.get("session_id")
+        for sid in session_ids:
+            label = (sessions[sid].get("goal") or "Untitled goal")[:48]
+            selector_col, remove_col = st.columns([5, 1])
+            with selector_col:
+                if st.button(
+                    label,
+                    key=f"select-session-{sid}",
+                    use_container_width=True,
+                    type="primary" if sid == active_id else "secondary",
+                ):
+                    if sid != active_id and not st.session_state.get(
+                        "new_goal_mode", False
+                    ):
+                        _restore_session(sid)
+                        st.rerun()
+            with remove_col:
+                if st.button(
+                    "×",
+                    key=f"remove-session-{sid}",
+                    help=f"Remove {label}",
+                ):
+                    _remove_session(sid)
+                    st.rerun()
 
 def go_to(screen: str):
     st.session_state.screen = screen
@@ -189,6 +407,8 @@ def get_topic_info(result: dict, idx: int):
 
 
 def new_session():
+    _save_active_session()
+    st.session_state.new_goal_mode = True
     defaults = {
         "screen": "GOAL_INPUT",
         "session_id": None,
@@ -234,6 +454,8 @@ def start_session(goal: str, model_provider: str = "ollama", model_name: str = "
     st.session_state.goal = goal
     st.session_state.model_provider = model_provider
     st.session_state.model_name = model_name
+    st.session_state.new_goal_mode = False
+    _register_active_session()
 
     state = initial_state(
         goal, session_id,
@@ -251,6 +473,7 @@ def start_session(goal: str, model_provider: str = "ollama", model_name: str = "
     if "__interrupt__" in result:
         payload = result["__interrupt__"][0].value
         st.session_state.roadmap = payload.get("roadmap")
+        _save_active_session()
         go_to("ROADMAP_APPROVAL")
     elif result.get("error"):
         st.session_state.error = result["error"]
@@ -288,6 +511,7 @@ def approve_roadmap(approved: bool):
         payload = result["__interrupt__"][0].value
         st.session_state.roadmap = payload.get("roadmap")
         go_to("ROADMAP_APPROVAL")
+        _save_active_session()
         return
 
     # Graph paused before quiz_generator, explainer has finished
@@ -315,9 +539,11 @@ def approve_roadmap(approved: bool):
         "question": f"Explain {title}",
         "response": explanation,
     }]
+    _persist_explainer_history()
 
     # Keep the learner in the Explainer; quiz generation is explicit.
     go_to("EXPLAINING")
+    _save_active_session()
 
 
 def advance_after_quiz(quiz_result: QuizResult):
@@ -382,6 +608,7 @@ def advance_after_quiz(quiz_result: QuizResult):
     rm = get_roadmap()
 
     go_to("COACHING")
+    _save_active_session()
 
 
 def continue_after_coaching(review: bool = False):
@@ -393,12 +620,20 @@ def continue_after_coaching(review: bool = False):
         else st.session_state.current_topic_index
     )
     try:
-        if review:
-            ui_graph.update_state(
-                config,
-                {"current_topic_index": target_index},
-                as_node="progress_coach",
-            )
+        resume_update = {
+            "current_topic_index": target_index,
+            "coaching_summary": "",
+            "coaching_encouragement": "",
+            "coaching_recommendation": "",
+            "coaching_review_focus": [],
+            "study_buddy_assistance": "",
+            "coaching_topic": "",
+        }
+        ui_graph.update_state(
+            config,
+            resume_update,
+            as_node="progress_coach",
+        )
         with st.spinner("Preparing the next explanation..."):
             result = ui_graph.invoke(None, config=config)
     except Exception as exc:
@@ -425,6 +660,7 @@ def continue_after_coaching(review: bool = False):
     st.session_state.coaching_message = ""
     st.session_state.study_buddy_assistance = ""
     go_to("EXPLAINING")
+    _save_active_session()
 
 
 def screen_coaching():
@@ -552,21 +788,19 @@ def screen_roadmap_approval():
 
 
 def screen_explaining():
+    _restore_explainer_history_from_checkpoint()
     rm = get_roadmap()
     total = len(rm.topics) if rm else 1
     idx = st.session_state.current_topic_index
 
     st.progress(idx / total, text=f"Topic {idx + 1} of {total}")
-    st.title(f"📖 {st.session_state.topic_title}")
+    st.header(f"📖 {st.session_state.topic_title}")
     st.caption(st.session_state.topic_description)
-    st.markdown("---")
 
     if st.session_state.coaching_message:
         st.info(f"💬 **Coach:** {st.session_state.coaching_message}")
-        st.markdown("---")
 
     if st.session_state.explainer_turns:
-        st.markdown("### Conversation")
         for turn in st.session_state.explainer_turns:
             with st.chat_message("user"):
                 st.markdown(turn["question"])
@@ -578,43 +812,35 @@ def screen_explaining():
     else:
         st.warning("No explanation available, starting quiz with topic context.")
 
-    st.markdown("---")
-    with st.form("explainer_follow_up"):
-        follow_up = st.text_area(
-            "Ask a follow-up",
-            placeholder="Ask for a simpler explanation, example, or more detail...",
-        )
-        ask = st.form_submit_button("Ask Explainer")
-    if ask:
-        if not follow_up.strip():
-            st.warning("Please enter a follow-up question.")
-        else:
-            try:
-                with st.spinner("Adapting the explanation..."):
-                    _, response = asyncio.run(_run_explainer_agent(
-                        st.session_state.topic_title,
-                        st.session_state.topic_description,
-                        st.session_state.session_id or "unknown",
-                        follow_up.strip(),
-                        st.session_state.model_provider,
-                        st.session_state.model_name,
-                        callbacks=(
-                            st.session_state.graph_config or {}
-                        ).get("callbacks"),
-                    ))
-                st.session_state.explanation = add_learning_resources(
-                    message_text(response.content),
+    follow_up = st.chat_input(
+        "Ask for a simpler explanation, example, or more detail..."
+    )
+    if follow_up:
+        try:
+            with st.spinner("Adapting the explanation..."):
+                _, response = asyncio.run(_run_explainer_agent(
                     st.session_state.topic_title,
-                )
-                st.session_state.explainer_turns.append({
-                    "question": follow_up.strip(),
-                    "response": st.session_state.explanation,
-                })
-                st.rerun()
-            except Exception as exc:
-                st.session_state.error = str(exc)
-                st.rerun()
-    st.markdown("---")
+                    st.session_state.topic_description,
+                    st.session_state.session_id or "unknown",
+                    follow_up.strip(),
+                    st.session_state.model_provider,
+                    st.session_state.model_name,
+                    callbacks=(
+                        st.session_state.graph_config or {}
+                    ).get("callbacks"),
+                ))
+            st.session_state.explanation = add_learning_resources(
+                message_text(response.content),
+                st.session_state.topic_title,
+            )
+            _append_explainer_turn(
+                follow_up.strip(),
+                st.session_state.explanation,
+            )
+            st.rerun()
+        except Exception as exc:
+            st.session_state.error = str(exc)
+            st.rerun()
     st.markdown(f"**Ready to test your knowledge of *{st.session_state.topic_title}*?**")
 
     if st.button("Start Quiz →", type="primary"):
@@ -795,6 +1021,8 @@ def display_error():
 
 # ── Router ────────────────────────────────────────────────────────────────────
 
+_load_postgres_sessions()
+render_session_sidebar()
 screen = st.session_state.screen
 
 if screen == "GOAL_INPUT":

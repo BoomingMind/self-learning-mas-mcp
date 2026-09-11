@@ -219,6 +219,8 @@ class AgentState(TypedDict):
     # Input intended for the Explainer. Planner/approval messages in the
     # shared history must never be mistaken for a learner question.
     learner_message: str
+    # UI transcript for the current topic, persisted with the graph checkpoint.
+    explainer_turns: list[dict[str, str]]
 
     # ── Session identity ──────────────────────────────────────────────
     # Unique ID for this study session. Used as the LangGraph thread_id
@@ -321,6 +323,7 @@ def initial_state(
     return {
         "messages": [],                     # No messages yet
         "learner_message": "",
+        "explainer_turns": [],
         "session_id": session_id,
         "model_provider": model_provider or configured_provider(),
         "model_name": model_name or configured_model(model_provider),

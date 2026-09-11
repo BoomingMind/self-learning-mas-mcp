@@ -28,3 +28,19 @@ Install dependencies with `pip install -r requirements.txt`, then run:
 ```text
 python main.py "Learn Python closures from scratch"
 ```
+
+### Persistent learner memory
+
+The memory MCP server stores learner observations in Redis hashes so they
+survive MCP process restarts. Start the Redis service with Docker Compose and
+provide its password through the environment (never commit it):
+
+```text
+REDIS_PASSWORD=your-local-password
+docker compose up -d redis
+```
+
+The application uses database `1` by default (`REDIS_DB=1`) and the
+`learning-memory:` key prefix, keeping learner memory separate from Langfuse.
+You can instead configure a complete `REDIS_URL`, or set `REDIS_HOST`,
+`REDIS_PORT`, `REDIS_PASSWORD`, and `REDIS_DB` in `.env`.

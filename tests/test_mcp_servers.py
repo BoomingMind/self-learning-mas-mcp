@@ -38,9 +38,10 @@ from mcp_servers.memory_server import (
     memory_get,
     memory_list_keys,
     memory_delete,
+    memory_delete_session,
     get_session_summary,
-    _store,   # direct access for test cleanup
 )
+import mcp_servers.memory_server as memory_server
 from mcp_servers.onecompiler_server import execute_code
 
 
@@ -276,12 +277,37 @@ class TestMemoryServer:
     """Tests for memory_set, memory_get, memory_list_keys, memory_delete."""
 
     def setup_method(self):
-        """Clear the store before each test for isolation."""
-        _store.clear()
+        """Use an in-memory Redis-shaped fake without requiring Docker."""
+        class FakeRedis:
+            def __init__(self):
+                self.hashes = {}
+
+            def hset(self, name, key, value):
+                self.hashes.setdefault(name, {})[key] = value
+
+            def hget(self, name, key):
+                return self.hashes.get(name, {}).get(key)
+
+            def hkeys(self, name):
+                return list(self.hashes.get(name, {}))
+
+            def hdel(self, name, key):
+                values = self.hashes.get(name, {})
+                if key not in values:
+                    return 0
+                del values[key]
+                return 1
+
+            def hgetall(self, name):
+                return dict(self.hashes.get(name, {}))
+
+            def delete(self, name):
+                return int(self.hashes.pop(name, None) is not None)
+
+        memory_server._redis_client = FakeRedis()
 
     def teardown_method(self):
-        """Clear the store after each test."""
-        _store.clear()
+        memory_server._redis_client = None
 
     def test_set_and_get_simple_value(self):
         """Basic round-trip: set a value and get it back."""
@@ -351,6 +377,12 @@ class TestMemoryServer:
         result = memory_delete("session-1", "nonexistent")
         assert "not found" in result.lower()
 
+    def test_delete_session_removes_all_memory(self):
+        memory_set("session-1", "a", "one")
+        memory_set("session-1", "b", "two")
+        assert "Deleted all memory" in memory_delete_session("session-1")
+        assert memory_list_keys("session-1") == []
+
     def test_set_returns_confirmation(self):
         """memory_set should return a confirmation message string."""
         result = memory_set("session-1", "key", "value")
@@ -366,14 +398,8 @@ class TestMemoryServer:
             assert memory_get(f"session-{i}", "data") == f"value-{i}"
 
 
-class TestGetSessionSummary:
+class TestGetSessionSummary(TestMemoryServer):
     """Tests for the notes://session/{session_id} resource."""
-
-    def setup_method(self):
-        _store.clear()
-
-    def teardown_method(self):
-        _store.clear()
 
     def test_empty_session_returns_no_data_message(self):
         result = get_session_summary("empty-session")

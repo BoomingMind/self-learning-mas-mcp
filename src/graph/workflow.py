@@ -159,3 +159,37 @@ def build_graph(
         interrupt_before=interrupt_before or [],
         interrupt_after=interrupt_after or [],
     )
+
+
+def list_persisted_sessions(checkpointer: Any) -> dict[str, dict[str, Any]]:
+    """Load the newest checkpoint state for each learning session."""
+    sessions: dict[str, dict[str, Any]] = {}
+    for checkpoint_tuple in checkpointer.list(None):
+        config = checkpoint_tuple.config
+        thread_id = config.get("configurable", {}).get("thread_id")
+        if not thread_id or thread_id in sessions:
+            continue
+        values = checkpoint_tuple.checkpoint.get("channel_values", {})
+        if not isinstance(values, dict):
+            values = {}
+        sessions[thread_id] = {
+            key: values[key]
+            for key in (
+                "goal", "roadmap", "current_topic_index", "quiz_results",
+                "weak_areas", "explanation", "topic_title",
+                "explainer_turns",
+                "topic_description", "coaching_summary", "coaching_message",
+                "coaching_encouragement", "coaching_recommendation",
+                "coaching_review_focus", "study_buddy_assistance",
+                "coaching_topic_index", "coaching_topic",
+                "approved", "session_id", "model_provider", "model_name",
+            )
+            if key in values
+        }
+        sessions[thread_id]["session_id"] = thread_id
+    return sessions
+
+
+def delete_persisted_session(checkpointer: Any, session_id: str) -> None:
+    """Delete every PostgreSQL checkpoint belonging to one learning session."""
+    checkpointer.delete_thread(session_id)

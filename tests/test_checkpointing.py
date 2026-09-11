@@ -27,7 +27,12 @@ from graph.state import (
     initial_state,
     session_is_complete,
 )
-from graph.workflow import route_after_approval, route_after_coach
+from graph.workflow import (
+    delete_persisted_session,
+    list_persisted_sessions,
+    route_after_approval,
+    route_after_coach,
+)
 from agents.human_approval import human_approval_node
 
 
@@ -42,6 +47,63 @@ class TestPostgresSaver:
         """PostgresSaver should be importable from langgraph."""
         from langgraph.checkpoint.postgres import PostgresSaver
         assert PostgresSaver is not None
+
+    def test_list_persisted_sessions_uses_latest_checkpoint_per_thread(self):
+        class FakeCheckpointer:
+            def list(self, config):
+                return iter([
+                    type(
+                        "Checkpoint",
+                        (),
+                        {
+                            "config": {"configurable": {"thread_id": "s1"}},
+                            "checkpoint": {
+                                "channel_values": {
+                                    "goal": "Learn Python",
+                                    "current_topic_index": 1,
+                                }
+                            },
+                        },
+                    )(),
+                    type(
+                        "Checkpoint",
+                        (),
+                        {
+                            "config": {"configurable": {"thread_id": "s1"}},
+                            "checkpoint": {
+                                "channel_values": {"goal": "older value"}
+                            },
+                        },
+                    )(),
+                    type(
+                        "Checkpoint",
+                        (),
+                        {
+                            "config": {"configurable": {"thread_id": "s2"}},
+                            "checkpoint": {
+                                "channel_values": {"goal": "Learn SQL"}
+                            },
+                        },
+                    )(),
+                ])
+
+        sessions = list_persisted_sessions(FakeCheckpointer())
+
+        assert sessions["s1"]["goal"] == "Learn Python"
+        assert sessions["s1"]["session_id"] == "s1"
+        assert sessions["s2"]["goal"] == "Learn SQL"
+
+    def test_delete_persisted_session_deletes_thread(self):
+        class FakeCheckpointer:
+            def __init__(self):
+                self.deleted = []
+
+            def delete_thread(self, thread_id):
+                self.deleted.append(thread_id)
+
+        checkpointer = FakeCheckpointer()
+        delete_persisted_session(checkpointer, "session-to-remove")
+        assert checkpointer.deleted == ["session-to-remove"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Human approval node tests
