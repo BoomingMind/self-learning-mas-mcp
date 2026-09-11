@@ -3,7 +3,7 @@ tests/test_eval.py
 
 LLM-as-judge evaluation tests for the Learning Accelerator.
 
-TIER 2 TESTS, require Ollama running locally.
+TIER 2 TESTS, require the configured model provider to be reachable.
 These tests are slow (30-120s each) and non-deterministic.
 Run them before significant changes, not during development.
 
@@ -35,38 +35,39 @@ import pytest
 # ─────────────────────────────────────────────────────────────────────────────
 # DeepEval configuration
 #
-# Configure DeepEval to use Ollama as the judge model.
-# This keeps evaluation entirely local, no OpenAI key required.
+# Configure DeepEval to use the same provider selected for the application.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_judge_model():
     """
-    Get the DeepEval judge model configured for local Ollama.
+    Get the DeepEval judge model configured for the application.
 
-    Uses LiteLLM under the hood to connect to Ollama's OpenAI-compatible API.
+    Wraps the project's configured LangChain chat model so evaluations can
+    exercise Ollama or OpenRouter without duplicating provider configuration.
     Returns None if deepeval is not installed.
     """
     try:
         from deepeval.models import DeepEvalBaseLLM
-        from langchain_ollama import ChatOllama
+        from model_config import build_chat_model, configured_model, configured_provider
 
-        class OllamaJudge(DeepEvalBaseLLM):
+        class ConfiguredJudge(DeepEvalBaseLLM):
             """
-            Custom judge model using local Ollama.
+            Custom judge model using the configured application provider.
 
             DeepEval supports custom models via the DeepEvalBaseLLM interface.
-            We wrap ChatOllama to provide the judge capabilities.
+            We wrap the project's provider factory to keep evaluation aligned
+            with production model selection.
             """
 
             def __init__(self):
-                self.model_name = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
-                self.base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+                self.provider = configured_provider()
+                self.model_name = configured_model(self.provider)
 
             def load_model(self):
-                return ChatOllama(
+                return build_chat_model(
+                    provider=self.provider,
                     model=self.model_name,
-                    base_url=self.base_url,
-                    temperature=0.0,  # Deterministic for evaluation
+                    temperature=0.0,
                 )
 
             def generate(self, prompt: str) -> str:
@@ -78,9 +79,9 @@ def get_judge_model():
                 return self.generate(prompt)
 
             def get_model_name(self) -> str:
-                return f"ollama/{self.model_name}"
+                return f"{self.provider}/{self.model_name}"
 
-        return OllamaJudge()
+        return ConfiguredJudge()
     except ImportError:
         return None
 

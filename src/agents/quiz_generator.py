@@ -134,6 +134,20 @@ def _external_quiz_context(topic: str, explanation: str) -> str:
     return "\n\n".join(context)
 
 
+def _normalize_questions(questions: list[dict]) -> list[dict]:
+    """Enforce the small structural contract expected by quiz consumers."""
+    normalized = []
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        item = dict(question)
+        text = str(item.get("question", "")).strip()
+        if text and not text.endswith("?"):
+            item["question"] = text.rstrip(".! ") + "?"
+        normalized.append(item)
+    return normalized
+
+
 def generate_questions(topic: str, explanation: str, n: int = 3, model_provider: str = "ollama", model_name: str = "") -> list[dict]:
     """
     Call the LLM to generate n quiz questions about a topic.
@@ -185,7 +199,7 @@ def generate_questions(topic: str, explanation: str, n: int = 3, model_provider:
         data = json.loads(response.content)
         questions = data.get("questions", [])
         if questions and isinstance(questions, list):
-            return questions
+            return _normalize_questions(questions)
     except (json.JSONDecodeError, KeyError):
         pass
 
