@@ -19,6 +19,7 @@ import os
 import asyncio
 
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langchain.agents import create_agent
 from langchain_ollama import ChatOllama
 
@@ -125,6 +126,7 @@ def build_planner_llm(provider: str = "ollama", model: str = ""):
         provider=provider, model=model or None,
         temperature=0.1,
         json_mode=True,
+        reasoning_effort="low",
     )
 
 
@@ -208,7 +210,9 @@ def parse_roadmap_json(json_string: str) -> StudyRoadmap:
 # returns a partial update dict with only the keys it changed.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def curriculum_planner_node(state: dict) -> dict:
+def curriculum_planner_node(
+    state: dict, config: RunnableConfig | None = None
+) -> dict:
     """
     LangGraph node: Curriculum Planner
 
@@ -243,11 +247,18 @@ def curriculum_planner_node(state: dict) -> dict:
 
     print(f"[Curriculum Planner] Calling {state.get('model_provider', 'ollama')}")
     try:
-        result = build_planner_agent(
+        callbacks = (config or {}).get("callbacks")
+        invoke_config = {"callbacks": callbacks} if callbacks else None
+        agent = build_planner_agent(
             state.get("model_provider", "ollama"),
             state.get("model_name", ""),
-        ).invoke({"messages": messages})
+        )
+        result = (
+            agent.invoke({"messages": messages}, config=invoke_config)
+            if invoke_config else agent.invoke({"messages": messages})
+        )
         response = result["messages"][-1]
+        print(f"[Curriculum Planner] LLM output:\n{response.content}")
     except Exception as e:
         print(f"[Curriculum Planner] LLM call failed: {e}")
         return {

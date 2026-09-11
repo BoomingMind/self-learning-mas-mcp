@@ -87,6 +87,7 @@ DEFAULT_POSTGRES_URL = (
 def build_graph(
     postgres_url: str | None = None,
     interrupt_before: list | None = None,
+    interrupt_after: list | None = None,
 ):
     """
     Build and compile the Learning Accelerator graph.
@@ -94,6 +95,7 @@ def build_graph(
     Args:
         postgres_url: PostgreSQL connection string for checkpoint storage.
         interrupt_before: List of node names to pause before (for UI integration).
+        interrupt_after: List of node names to pause after (for UI integration).
 
     PostgresSaver persists checkpoints in PostgreSQL. The checkpoint tables
     are created automatically on startup.
@@ -155,4 +157,5 @@ def build_graph(
     return builder.compile(
         checkpointer=checkpointer,
         interrupt_before=interrupt_before or [],
+        interrupt_after=interrupt_after or [],
     )

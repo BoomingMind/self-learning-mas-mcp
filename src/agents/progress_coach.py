@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
 
 from graph.state import get_latest_quiz_result
 from mcp_client import call_tool
@@ -32,7 +33,9 @@ warm coaching message (2-3 sentences max).
 Your final response must be ONLY valid JSON:
 {{
   "summary": "2-3 sentence encouraging summary",
-  "encouragement": "One short motivational sentence for next steps"
+  "encouragement": "One short motivational sentence for next steps",
+  "recommendation": "Specific recommendation for what the learner should do next",
+  "review_focus": ["specific concepts to review"]
 }}
 
 Be specific, reference the topic and any weak areas by name.
@@ -40,12 +43,45 @@ Never be discouraging. A low score means "more practice needed", not "you failed
 """
 
 
-def get_coaching_message(topic: str, score: float, weak_areas: list[str], model_provider: str = "ollama", model_name: str = "") -> dict:
+def _content_text(content: object) -> str:
+    """Normalize text/content blocks returned by different chat model providers."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            block if isinstance(block, str) else str(block.get("text", ""))
+            for block in content
+            if isinstance(block, str) or isinstance(block, dict)
+        )
+    return str(content)
+
+
+def _coaching_fallback(topic: str, score: float, weak_areas: list[str]) -> dict:
+    return {
+        "summary": f"You scored {score:.0%} on {topic}.",
+        "encouragement": "Keep going, every topic builds on the last!",
+        "recommendation": (
+            f"Review {', '.join(weak_areas)} before trying another quiz."
+            if weak_areas else "Continue practicing with another example."
+        ),
+        "review_focus": weak_areas,
+    }
+
+
+def get_coaching_message(
+    topic: str,
+    score: float,
+    weak_areas: list[str],
+    model_provider: str = "ollama",
+    model_name: str = "",
+    callbacks: list | None = None,
+) -> dict:
     """Ask the LLM for a personalised coaching message."""
     llm = build_chat_model(
         provider=model_provider, model=model_name or None,
         temperature=0.4,
         json_mode=True,
+        reasoning_effort="low",
     )
 
     context = {
@@ -55,28 +91,37 @@ def get_coaching_message(topic: str, score: float, weak_areas: list[str], model_
     }
 
     try:
-        result = create_agent(
+        request = {"messages": [HumanMessage(content=json.dumps(context))]}
+        agent = create_agent(
             model=llm,
             system_prompt=COACHING_PROMPT,
             name="progress_coach",
-        ).invoke({
-            "messages": [HumanMessage(content=json.dumps(context))],
-        })
+        )
+        invoke_config = {"callbacks": callbacks} if callbacks else None
+        result = (
+            agent.invoke(request, config=invoke_config)
+            if invoke_config else agent.invoke(request)
+        )
         response = result["messages"][-1]
+        print(f"[Progress Coach] Input:\n{json.dumps(context)}")
+        print(f"[Progress Coach] Output:\n{response.content}")
     except Exception as e:
         print(f"[Progress Coach] LLM call failed: {e}")
-        return {
-            "summary": f"You scored {score:.0%} on {topic}. Keep going!",
-            "encouragement": "Every topic builds on the last.",
-        }
+        return _coaching_fallback(topic, score, weak_areas)
 
     try:
-        return json.loads(response.content)
+        text = _content_text(response.content).strip()
+        if text.startswith("```"):
+            text = text.strip("`").removeprefix("json").strip()
+        parsed = json.loads(text)
+        if not isinstance(parsed, dict):
+            raise ValueError("coaching response must be a JSON object")
+        fallback = _coaching_fallback(topic, score, weak_areas)
+        return {**fallback, **parsed}
     except json.JSONDecodeError:
-        return {
-            "summary":      f"You scored {score:.0%} on {topic}.",
-            "encouragement": "Keep going, every topic builds on the last!",
-        }
+        return _coaching_fallback(topic, score, weak_areas)
+    except (TypeError, ValueError):
+        return _coaching_fallback(topic, score, weak_areas)
 
 
 def try_study_buddy_assistance(
@@ -116,17 +161,27 @@ def try_study_buddy_assistance(
             study_buddy_url=study_buddy_url,
         )
 
+        if isinstance(result, str):
+            return result
+        if isinstance(result.get("text"), str):
+            try:
+                result = json.loads(result["text"])
+            except json.JSONDecodeError:
+                return result["text"]
         if "error" in result or result.get("status") == "error":
             return None
 
-        return result.get("assistance", "")
+        assistance = result.get("assistance", "")
+        return assistance if isinstance(assistance, str) else _content_text(assistance)
 
     except Exception as e:
         print(f"[Progress Coach] Study Buddy error: {e}")
         return None
 
 
-def progress_coach_node(state: dict) -> dict:
+def progress_coach_node(
+    state: dict, config: RunnableConfig | None = None
+) -> dict:
     """
     LangGraph node: Progress Coach
 
@@ -163,6 +218,7 @@ def progress_coach_node(state: dict) -> dict:
     coaching = get_coaching_message(
         latest.topic, score, latest.weak_areas,
         state.get("model_provider", "ollama"), state.get("model_name", ""),
+        callbacks=(config or {}).get("callbacks"),
     )
 
     # ── Update topic status ───────────────────────────────────────────
@@ -226,7 +282,8 @@ def progress_coach_node(state: dict) -> dict:
     # When a student scores below the pass threshold, request supplementary
     # help from the CrewAI Study Buddy via A2A.
     # This is where LangGraph calls CrewAI through the A2A protocol.
-    if score < PASS_THRESHOLD and latest.weak_areas:
+    assistance = None
+    if score < PASS_THRESHOLD:
         # Extract the most recent explanation from messages
         explanation = ""
         for msg in reversed(state.get("messages", [])):
@@ -238,7 +295,7 @@ def progress_coach_node(state: dict) -> dict:
         assistance = try_study_buddy_assistance(
             topic=latest.topic,
             explanation=explanation,
-            weak_areas=latest.weak_areas,
+            weak_areas=latest.weak_areas or ["general understanding"],
         )
 
         if assistance:
@@ -255,5 +312,12 @@ def progress_coach_node(state: dict) -> dict:
         "quiz_requested": False,
         "awaiting_quiz_approval": False,
         "messages":              [AIMessage(content=coaching["summary"])],
+        "coaching_summary":      coaching["summary"],
+        "coaching_encouragement": coaching["encouragement"],
+        "coaching_recommendation": coaching.get("recommendation", ""),
+        "coaching_review_focus": coaching.get("review_focus", []),
+        "study_buddy_assistance": assistance or "",
+        "coaching_topic_index":  idx,
+        "coaching_topic":        latest.topic,
         "error":                 None,
     }

@@ -135,6 +135,14 @@ def build_study_buddy_crew(
             model=f"openrouter/{os.getenv('OPENROUTER_MODEL', MODEL_NAME)}",
             api_key=os.getenv("OPENROUTER_API_KEY"),
             base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+            reasoning_effort="medium",
+        )
+    elif MODEL_PROVIDER == "groq":
+        llm = LLM(
+            model=f"groq/{os.getenv('GROQ_MODEL', 'openai/gpt-oss-120b')}",
+            api_key=os.getenv("GROQ_API_KEY"),
+            base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+            reasoning_effort="medium",
         )
     else:
         llm = LLM(

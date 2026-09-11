@@ -11,6 +11,7 @@ Run: python -m pytest tests/test_explainer.py -v
 
 from graph.state import StudyRoadmap, Topic, initial_state, get_current_topic
 from agents.explainer import (
+    add_learning_resources,
     classify_explainer_status,
     determine_explainer_status,
 )
@@ -48,6 +49,21 @@ class TestGetCurrentTopic:
 
 
 class TestInteractiveExplainerPolicy:
+    def test_learning_resources_are_real_tavily_urls(self, monkeypatch):
+        async def search(*args, **kwargs):
+            return {
+                "results": [
+                    {"url": "https://docs.python.org/3/tutorial/"},
+                    {"url": "not-a-url"},
+                ]
+            }
+
+        monkeypatch.setattr("agents.explainer.call_tool", search)
+        result = add_learning_resources("Explain recursion.", "Python recursion")
+        assert "https://docs.python.org/3/tutorial/" in result
+        assert "not-a-url" not in result
+        assert "Further learning" in result
+
     def test_explicit_quiz_request_routes_to_quiz(self):
         status, requested, awaiting = determine_explainer_status("Quiz me now")
         assert (status, requested, awaiting) == ("READY_FOR_QUIZ", True, False)
@@ -108,3 +124,48 @@ class TestInteractiveExplainerPolicy:
         assert classify_explainer_status(
             "Closures", "Quiz me now", "Explanation", "CONTINUE", False, 1, "openrouter"
         ) == ("READY_FOR_QUIZ", True, False)
+
+    def test_explainer_node_exposes_current_topic_response(self, monkeypatch):
+        from langchain_core.messages import AIMessage, HumanMessage
+        from agents import explainer
+
+        topic = Topic("Recursion", "Functions calling themselves", 30)
+        state = initial_state("learn recursion", "session-1")
+        state["roadmap"] = StudyRoadmap("learn recursion", 1, [topic])
+        state["messages"] = [
+            HumanMessage(content="Create a study roadmap for this learning goal: learn recursion"),
+            AIMessage(content='{"goal":"learn recursion","topics":[{"title":"Recursion"}]}'),
+        ]
+        state["learner_message"] = ""
+        callback = object()
+
+        async def run_agent(*args, **kwargs):
+            assert args[3] == ""
+            assert kwargs["callbacks"] == [callback]
+            return [AIMessage(content="Roadmap text"), AIMessage(content="Recursion explanation")], AIMessage(
+                content="Recursion explanation"
+            )
+
+        monkeypatch.setattr(explainer, "_run_explainer_agent", run_agent)
+        monkeypatch.setattr(
+            explainer,
+            "classify_explainer_status",
+            lambda *args, **kwargs: ("CONTINUE", False, False),
+        )
+        monkeypatch.setattr(
+            explainer,
+            "add_learning_resources",
+            lambda text, topic_title: text + "\n### Further learning\n- https://example.com",
+        )
+
+        result = explainer.explainer_node(
+            state, config={"callbacks": [callback]}
+        )
+        assert result["explanation"].startswith("Recursion explanation")
+
+    def test_streamlit_explanation_filter_rejects_roadmap_json(self):
+        import streamlit_app
+
+        roadmap = '{"goal":"Learn Python","topics":[{"title":"Basics"}]}'
+        assert streamlit_app._is_roadmap_response(roadmap)
+        assert not streamlit_app._is_roadmap_response("Recursion is a function calling itself.")

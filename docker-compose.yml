@@ -9,7 +9,7 @@
 # Stop + DELETE ALL DATA:
 #   docker compose down -v
 #
-# UI:
+# Langfuse UI:
 #   http://localhost:3000
 #
 # Langfuse worker:
@@ -21,11 +21,14 @@
 # MinIO Console:
 #   http://localhost:9091
 #
-# PostgreSQL:
+# PostgreSQL - Langfuse:
 #   localhost:5432
 #
-# Learning Accelerator checkpoints use the dedicated PostgreSQL container:
-#   postgresql://postgres:postgres@127.0.0.1:5433/checkpoints
+# PostgreSQL - Learning Accelerator checkpoints:
+#   localhost:5433
+#
+# pgAdmin:
+#   http://localhost:5050
 #
 # ClickHouse HTTP:
 #   localhost:8123
@@ -35,6 +38,7 @@
 #
 # Redis:
 #   localhost:6379
+
 
 services:
 
@@ -59,11 +63,16 @@ services:
       - learning_checkpoints_postgres_data:/var/lib/postgresql/data
 
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d checkpoints"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U postgres -d checkpoints"
+        ]
       interval: 3s
       timeout: 5s
       retries: 20
       start_period: 5s
+
 
   # ------------------------------------------------------------
   # Langfuse Web UI / API
@@ -86,6 +95,7 @@ services:
       - "3000:3000"
 
     environment:
+
       # -------------------------
       # General
       # -------------------------
@@ -95,16 +105,17 @@ services:
       SALT: local-dev-salt-change-me
 
       # Must be a 64-character hexadecimal string.
-      # Generate a real one for anything beyond local testing.
       ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
       TELEMETRY_ENABLED: "false"
       LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
 
+
       # -------------------------
       # PostgreSQL
       # -------------------------
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/langfuse
+
 
       # -------------------------
       # ClickHouse
@@ -116,14 +127,15 @@ services:
       CLICKHOUSE_DB: default
       CLICKHOUSE_CLUSTER_ENABLED: "false"
 
+
       # -------------------------
       # Redis
       # -------------------------
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_AUTH: myredissecret
-
       REDIS_TLS_ENABLED: "false"
+
 
       # -------------------------
       # S3 / MinIO - event uploads
@@ -136,6 +148,7 @@ services:
       LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
 
+
       # -------------------------
       # S3 / MinIO - media uploads
       # -------------------------
@@ -146,6 +159,7 @@ services:
       LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
       LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+
 
       # -------------------------
       # S3 / MinIO - batch export
@@ -160,6 +174,7 @@ services:
       LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY: miniosecret
       LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE: "true"
 
+
       # -------------------------
       # Optional
       # -------------------------
@@ -168,6 +183,7 @@ services:
 
       EMAIL_FROM_ADDRESS: ""
       SMTP_CONNECTION_URL: ""
+
 
   # ------------------------------------------------------------
   # Langfuse Worker
@@ -190,6 +206,7 @@ services:
       - "127.0.0.1:3030:3030"
 
     environment:
+
       # -------------------------
       # General
       # -------------------------
@@ -202,10 +219,12 @@ services:
       TELEMETRY_ENABLED: "false"
       LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
 
+
       # -------------------------
       # PostgreSQL
       # -------------------------
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/langfuse
+
 
       # -------------------------
       # ClickHouse
@@ -217,14 +236,15 @@ services:
       CLICKHOUSE_DB: default
       CLICKHOUSE_CLUSTER_ENABLED: "false"
 
+
       # -------------------------
       # Redis
       # -------------------------
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_AUTH: myredissecret
-
       REDIS_TLS_ENABLED: "false"
+
 
       # -------------------------
       # S3 / MinIO - event uploads
@@ -237,6 +257,7 @@ services:
       LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
 
+
       # -------------------------
       # S3 / MinIO - media uploads
       # -------------------------
@@ -247,6 +268,7 @@ services:
       LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
       LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
       LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+
 
       # -------------------------
       # S3 / MinIO - batch export
@@ -261,6 +283,7 @@ services:
       LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY: miniosecret
       LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE: "true"
 
+
       # -------------------------
       # Optional
       # -------------------------
@@ -269,6 +292,7 @@ services:
 
       EMAIL_FROM_ADDRESS: ""
       SMTP_CONNECTION_URL: ""
+
 
   # ------------------------------------------------------------
   # ClickHouse
@@ -303,6 +327,7 @@ services:
       retries: 20
       start_period: 10s
 
+
   # ------------------------------------------------------------
   # MinIO - S3-compatible object storage
   # ------------------------------------------------------------
@@ -328,11 +353,18 @@ services:
       - langfuse_minio_data:/data
 
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test:
+        [
+          "CMD",
+          "mc",
+          "ready",
+          "local"
+        ]
       interval: 3s
       timeout: 10s
       retries: 20
       start_period: 5s
+
 
   # ------------------------------------------------------------
   # Redis
@@ -365,8 +397,9 @@ services:
       retries: 20
       start_period: 5s
 
+
   # ------------------------------------------------------------
-  # PostgreSQL
+  # PostgreSQL - Langfuse
   # ------------------------------------------------------------
   postgres:
     image: docker.io/postgres:16-alpine
@@ -396,6 +429,32 @@ services:
       retries: 20
       start_period: 5s
 
+
+  # ------------------------------------------------------------
+  # pgAdmin 4 - PostgreSQL Management GUI
+  # ------------------------------------------------------------
+  pgadmin:
+    image: docker.io/dpage/pgadmin4:9.17
+    container_name: pgadmin
+    restart: unless-stopped
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      checkpoint-postgres:
+        condition: service_healthy
+
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+
+    ports:
+      - "127.0.0.1:5050:80"
+
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+
 # --------------------------------------------------------------
 # Persistent volumes
 # --------------------------------------------------------------
@@ -417,4 +476,7 @@ volumes:
     driver: local
 
   learning_checkpoints_postgres_data:
+    driver: local
+
+  pgadmin_data:
     driver: local

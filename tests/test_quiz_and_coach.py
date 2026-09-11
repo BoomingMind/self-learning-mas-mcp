@@ -90,6 +90,21 @@ class TestGenerateQuestions:
         result = generate_questions("Topic", "explanation", n=2)
         assert len(result) == 1  # fallback
 
+    @patch("agents.quiz_generator.create_agent")
+    def test_forwards_callbacks_to_question_generator(self, mock_create_agent):
+        mock_create_agent.return_value.invoke.return_value = {
+            "messages": [AIMessage(content=self._make_valid_json(1))]
+        }
+        callback = object()
+
+        generate_questions(
+            "Closures", "explanation", n=1, callbacks=[callback]
+        )
+
+        assert mock_create_agent.return_value.invoke.call_args.kwargs["config"] == {
+            "callbacks": [callback]
+        }
+
     @patch("agents.quiz_generator.call_tool")
     def test_stable_topic_does_not_search_or_execute(self, mock_call_tool):
         """Stable quiz requests should not incur external tool calls."""
@@ -155,6 +170,24 @@ class TestGradeAnswer:
         assert "correct" in result
         assert "score" in result
         assert result["score"] == 0.0
+
+    @patch("agents.quiz_generator.create_agent")
+    def test_forwards_callbacks_to_grader(self, mock_create_agent):
+        mock_create_agent.return_value.invoke.return_value = {
+            "messages": [AIMessage(content=json.dumps({
+                "correct": True,
+                "score": 1.0,
+                "feedback": "Correct.",
+                "missing_concept": "",
+            }))]
+        }
+        callback = object()
+
+        grade_answer("Q?", "Expected", "Answer", callbacks=[callback])
+
+        assert mock_create_agent.return_value.invoke.call_args.kwargs["config"] == {
+            "callbacks": [callback]
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -258,6 +291,18 @@ class TestProgressCoachNode:
         messages = result.get("messages", [])
         assert len(messages) > 0
         assert isinstance(messages[-1], AIMessage)
+        assert result["coaching_summary"] == "You scored 80%!"
+        assert result["study_buddy_assistance"] == ""
+        assert result["coaching_recommendation"] == ""
+
+    @patch("agents.progress_coach.try_study_buddy_assistance")
+    @patch("agents.progress_coach.get_coaching_message")
+    def test_exposes_study_buddy_feedback(self, mock_coaching, mock_buddy):
+        mock_coaching.return_value = {"summary": "Review this.", "encouragement": "Keep going."}
+        mock_buddy.return_value = "Try a different analogy."
+        state = self._make_state_with_quiz_result(score=0.3, n_topics=2)
+        result = progress_coach_node(state)
+        assert result["study_buddy_assistance"] == "Try a different analogy."
 
     def test_returns_error_without_quiz_results(self):
         """Node should return error state if no quiz results exist."""

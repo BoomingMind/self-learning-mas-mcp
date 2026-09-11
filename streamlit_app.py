@@ -11,8 +11,8 @@ Run:
     streamlit run streamlit_app.py
 
 Architecture:
-    The app is a state machine with five screens:
-    GOAL_INPUT → ROADMAP_APPROVAL → EXPLAINING → QUIZZING → COMPLETE
+    The app is a state machine with six screens:
+    GOAL_INPUT → ROADMAP_APPROVAL → EXPLAINING → QUIZZING → COACHING → COMPLETE
 
     A separate graph instance (ui_graph) is compiled with
     interrupt_before=["quiz_generator"] so the graph pauses before the
@@ -28,6 +28,7 @@ Architecture:
 """
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -47,7 +48,7 @@ from graph.workflow import build_graph
 from graph.state import initial_state, StudyRoadmap, QuizResult, QuizQuestion
 from observability.langfuse_setup import get_langfuse_config, flush_langfuse
 from agents.quiz_generator import generate_questions, grade_answer
-from agents.explainer import _run_explainer_agent
+from agents.explainer import _run_explainer_agent, add_learning_resources
 from model_config import configured_model
 
 
@@ -56,6 +57,7 @@ from model_config import configured_model
 # quiz I/O without calling input() which would block Streamlit.
 ui_graph = build_graph(
     interrupt_before=["quiz_generator"],
+    interrupt_after=["progress_coach"],
 )
 
 
@@ -86,6 +88,12 @@ def init_state():
         "topic_title": "",
         "topic_description": "",
         "coaching_message": "",
+        "coaching_encouragement": "",
+        "coaching_recommendation": "",
+        "coaching_review_focus": [],
+        "study_buddy_assistance": "",
+        "coaching_topic_index": 0,
+        "coaching_topic": "",
         "error": None,
         "goal": "",
         "explainer_turns": [],
@@ -115,12 +123,27 @@ def get_roadmap() -> StudyRoadmap | None:
 
 
 def extract_explanation(messages: list) -> str:
-    """Get the Explainer's final response, last AIMessage with no tool calls."""
+    """Get a topic explanation, never the Curriculum Planner roadmap JSON."""
     from langchain_core.messages import AIMessage
     for msg in reversed(messages):
         if isinstance(msg, AIMessage) and msg.content and not getattr(msg, "tool_calls", None):
-            return message_text(msg.content)
+            content = message_text(msg.content).strip()
+            if _is_roadmap_response(content):
+                continue
+            return content
     return ""
+
+
+def _is_roadmap_response(content: str) -> bool:
+    """Identify planner output so it cannot leak into the Explainer screen."""
+    candidate = content.strip()
+    if candidate.startswith("```"):
+        candidate = candidate.strip("`").removeprefix("json").strip()
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and isinstance(parsed.get("topics"), list)
 
 
 def extract_coaching(messages: list) -> str:
@@ -182,6 +205,12 @@ def new_session():
         "topic_title": "",
         "topic_description": "",
         "coaching_message": "",
+        "coaching_encouragement": "",
+        "coaching_recommendation": "",
+        "coaching_review_focus": [],
+        "study_buddy_assistance": "",
+        "coaching_topic_index": 0,
+        "coaching_topic": "",
         "error": None,
         "goal": "",
         "explainer_turns": [],
@@ -264,7 +293,14 @@ def approve_roadmap(approved: bool):
     # Graph paused before quiz_generator, explainer has finished
     # result contains messages with the explanation
     messages = result.get("messages", [])
-    explanation = extract_explanation(messages)
+    # Prefer the explicit Explainer output. The checkpoint also contains the
+    # planner's roadmap message, which must never be shown as the explanation.
+    candidate = result.get("explanation", "")
+    explanation = (
+        str(candidate).strip()
+        if candidate and not _is_roadmap_response(str(candidate))
+        else extract_explanation(messages)
+    )
     st.session_state.explanation = explanation
 
     roadmap = result.get("roadmap") or st.session_state.roadmap
@@ -275,6 +311,10 @@ def approve_roadmap(approved: bool):
     title, desc = get_topic_info(result, idx)
     st.session_state.topic_title = title
     st.session_state.topic_description = desc
+    st.session_state.explainer_turns = [{
+        "question": f"Explain {title}",
+        "response": explanation,
+    }]
 
     # Keep the learner in the Explainer; quiz generation is explicit.
     go_to("EXPLAINING")
@@ -284,8 +324,8 @@ def advance_after_quiz(quiz_result: QuizResult):
     """
     After the UI-handled quiz is complete:
     1. Inject the QuizResult into the checkpoint as if quiz_generator ran.
-    2. Resume graph from progress_coach → (explainer or END).
-    3. If explainer runs (more topics), pause again before next quiz_generator.
+    2. Resume graph through progress_coach and pause for visible feedback.
+    3. The learner chooses review or continuation before the next Explainer runs.
     """
     config = st.session_state.graph_config
     existing = st.session_state.quiz_results
@@ -316,10 +356,21 @@ def advance_after_quiz(quiz_result: QuizResult):
         st.session_state.error = str(exc)
         return
 
-    # Extract coaching from messages
-    messages = result.get("messages", [])
-    coaching = extract_coaching(messages)
-    st.session_state.coaching_message = coaching
+    # Progress Coach is an explicit UI step. Do not run the next Explainer
+    # until the learner has seen and acted on both recommendations.
+    st.session_state.coaching_message = result.get(
+        "coaching_summary", extract_coaching(result.get("messages", []))
+    )
+    st.session_state.coaching_encouragement = result.get("coaching_encouragement", "")
+    st.session_state.coaching_recommendation = result.get("coaching_recommendation", "")
+    st.session_state.coaching_review_focus = result.get("coaching_review_focus", [])
+    st.session_state.study_buddy_assistance = result.get("study_buddy_assistance", "")
+    st.session_state.coaching_topic_index = result.get(
+        "coaching_topic_index", st.session_state.current_topic_index - 1
+    )
+    st.session_state.coaching_topic = result.get(
+        "coaching_topic", st.session_state.topic_title
+    )
 
     # Update accumulated state
     st.session_state.quiz_results = result.get("quiz_results", existing + [quiz_result])
@@ -330,21 +381,88 @@ def advance_after_quiz(quiz_result: QuizResult):
 
     rm = get_roadmap()
 
-    # Session complete
-    if rm is None or new_idx >= len(rm.topics):
-        flush_langfuse()
-        go_to("COMPLETE")
+    go_to("COACHING")
+
+
+def continue_after_coaching(review: bool = False):
+    """Resume the graph after the learner chooses a coaching recommendation."""
+    config = st.session_state.graph_config
+    target_index = (
+        st.session_state.coaching_topic_index
+        if review
+        else st.session_state.current_topic_index
+    )
+    try:
+        if review:
+            ui_graph.update_state(
+                config,
+                {"current_topic_index": target_index},
+                as_node="progress_coach",
+            )
+        with st.spinner("Preparing the next explanation..."):
+            result = ui_graph.invoke(None, config=config)
+    except Exception as exc:
+        st.session_state.error = str(exc)
         return
 
-    # More topics: show the next explanation before generating a quiz.
-    explanation = extract_explanation(messages)
-    st.session_state.explanation = explanation
-
-    title, desc = get_topic_info(result, new_idx)
+    messages = result.get("messages", [])
+    idx = result.get("current_topic_index", target_index)
+    st.session_state.current_topic_index = idx
+    st.session_state.roadmap = result.get("roadmap", st.session_state.roadmap)
+    candidate = result.get("explanation", "")
+    st.session_state.explanation = (
+        str(candidate).strip()
+        if candidate and not _is_roadmap_response(str(candidate))
+        else extract_explanation(messages)
+    )
+    title, desc = get_topic_info(result, idx)
     st.session_state.topic_title = title
     st.session_state.topic_description = desc
-
+    st.session_state.explainer_turns = [{
+        "question": f"Explain {title}",
+        "response": st.session_state.explanation,
+    }]
+    st.session_state.coaching_message = ""
+    st.session_state.study_buddy_assistance = ""
     go_to("EXPLAINING")
+
+
+def screen_coaching():
+    st.title("💬 Progress Coach Feedback")
+    st.markdown(f"### {st.session_state.coaching_topic}")
+    st.success(st.session_state.coaching_message or "Keep practicing this topic.")
+    if st.session_state.coaching_encouragement:
+        st.info(st.session_state.coaching_encouragement)
+    if st.session_state.coaching_recommendation:
+        st.markdown("### Recommendation")
+        st.markdown(st.session_state.coaching_recommendation)
+    if st.session_state.coaching_review_focus:
+        st.markdown("### Review focus")
+        for focus in st.session_state.coaching_review_focus:
+            st.markdown(f"- {focus}")
+    if st.session_state.study_buddy_assistance:
+        st.markdown("### 🤝 Study Buddy Recommendation")
+        st.markdown(st.session_state.study_buddy_assistance)
+
+    rm = get_roadmap()
+    is_last = rm is None or st.session_state.current_topic_index >= len(rm.topics)
+    st.markdown("---")
+    st.markdown("What would you like to do next?")
+    review_label = "🔁 Review this topic again"
+    next_label = "Continue to next topic →" if not is_last else "Finish session →"
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button(review_label, type="primary", use_container_width=True):
+            continue_after_coaching(review=True)
+            st.rerun()
+    with col2:
+        if st.button(next_label, use_container_width=True):
+            if is_last:
+                flush_langfuse()
+                go_to("COMPLETE")
+            else:
+                continue_after_coaching(review=False)
+            st.rerun()
 
 
 # ── Screens ───────────────────────────────────────────────────────────────────
@@ -364,7 +482,7 @@ def screen_goal_input():
         )
         provider = st.selectbox(
             "Model provider",
-            ["ollama", "openrouter"],
+            ["ollama", "openrouter", "groq"],
             key="selected_model_provider",
             format_func=lambda value: value.title(),
         )
@@ -447,9 +565,16 @@ def screen_explaining():
         st.info(f"💬 **Coach:** {st.session_state.coaching_message}")
         st.markdown("---")
 
-    if st.session_state.explanation:
-        st.markdown("### Explanation")
-        st.markdown(st.session_state.explanation)
+    if st.session_state.explainer_turns:
+        st.markdown("### Conversation")
+        for turn in st.session_state.explainer_turns:
+            with st.chat_message("user"):
+                st.markdown(turn["question"])
+            with st.chat_message("assistant"):
+                st.markdown(turn["response"])
+    elif st.session_state.explanation:
+        with st.chat_message("assistant"):
+            st.markdown(st.session_state.explanation)
     else:
         st.warning("No explanation available, starting quiz with topic context.")
 
@@ -473,8 +598,14 @@ def screen_explaining():
                         follow_up.strip(),
                         st.session_state.model_provider,
                         st.session_state.model_name,
+                        callbacks=(
+                            st.session_state.graph_config or {}
+                        ).get("callbacks"),
                     ))
-                st.session_state.explanation = message_text(response.content)
+                st.session_state.explanation = add_learning_resources(
+                    message_text(response.content),
+                    st.session_state.topic_title,
+                )
                 st.session_state.explainer_turns.append({
                     "question": follow_up.strip(),
                     "response": st.session_state.explanation,
@@ -483,10 +614,6 @@ def screen_explaining():
             except Exception as exc:
                 st.session_state.error = str(exc)
                 st.rerun()
-    for turn in st.session_state.explainer_turns:
-        with st.expander(f"You asked: {turn['question']}"):
-            st.markdown(turn["response"])
-
     st.markdown("---")
     st.markdown(f"**Ready to test your knowledge of *{st.session_state.topic_title}*?**")
 
@@ -499,6 +626,9 @@ def screen_explaining():
                     n=3,
                     model_provider=st.session_state.model_provider,
                     model_name=st.session_state.model_name,
+                    callbacks=(
+                        st.session_state.graph_config or {}
+                    ).get("callbacks"),
                 )
         except Exception as exc:
             st.session_state.error = str(exc)
@@ -562,6 +692,9 @@ def screen_quizzing():
                         question_text, expected, user_answer,
                         model_provider=st.session_state.model_provider,
                         model_name=st.session_state.model_name,
+                        callbacks=(
+                            st.session_state.graph_config or {}
+                        ).get("callbacks"),
                     )
             except Exception as exc:
                 st.session_state.error = str(exc)
@@ -675,6 +808,9 @@ elif screen == "EXPLAINING":
 elif screen == "QUIZZING":
     display_error()
     screen_quizzing()
+elif screen == "COACHING":
+    display_error()
+    screen_coaching()
 elif screen == "COMPLETE":
     screen_complete()
 else:

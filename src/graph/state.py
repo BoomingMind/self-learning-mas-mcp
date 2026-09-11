@@ -216,6 +216,9 @@ class AgentState(TypedDict):
     # not written over. This preserves the full conversation history
     # across all agent calls within a session.
     messages: Annotated[list[BaseMessage], add_messages]
+    # Input intended for the Explainer. Planner/approval messages in the
+    # shared history must never be mistaken for a learner question.
+    learner_message: str
 
     # ── Session identity ──────────────────────────────────────────────
     # Unique ID for this study session. Used as the LangGraph thread_id
@@ -263,6 +266,16 @@ class AgentState(TypedDict):
     explainer_iterations: int
     quiz_requested: bool
     awaiting_quiz_approval: bool
+    # UI-visible feedback produced by Progress Coach after a quiz.
+    coaching_summary: str
+    coaching_encouragement: str
+    coaching_recommendation: str
+    coaching_review_focus: list[str]
+    study_buddy_assistance: str
+    coaching_topic_index: int
+    coaching_topic: str
+    # Latest current-topic response from the Explainer.
+    explanation: str
 
     # ── Error handling ────────────────────────────────────────────────
     # If a node fails, it writes the error message here instead of
@@ -307,6 +320,7 @@ def initial_state(
     """
     return {
         "messages": [],                     # No messages yet
+        "learner_message": "",
         "session_id": session_id,
         "model_provider": model_provider or configured_provider(),
         "model_name": model_name or configured_model(model_provider),
@@ -321,6 +335,14 @@ def initial_state(
         "explainer_iterations": 0,
         "quiz_requested": False,
         "awaiting_quiz_approval": False,
+        "coaching_summary": "",
+        "coaching_encouragement": "",
+        "coaching_recommendation": "",
+        "coaching_review_focus": [],
+        "study_buddy_assistance": "",
+        "coaching_topic_index": 0,
+        "coaching_topic": "",
+        "explanation": "",
         "error": None,                      # No errors
     }
 

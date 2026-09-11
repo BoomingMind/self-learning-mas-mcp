@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
+from mcp_client import server_config
 
 
 @pytest.mark.asyncio
@@ -51,3 +52,15 @@ async def test_servers_are_discovered_and_called_over_stdio():
             "session_id": "stdio-test",
             "key": "topic",
         }) == "closures"
+
+
+def test_rapidapi_onecompiler_uses_hosted_mcp(monkeypatch):
+    """RapidAPI credentials select the supplied hosted MCP gateway."""
+    monkeypatch.setenv("ONECOMPILER_PROVIDER", "rapidapi")
+    monkeypatch.setenv("ONECOMPILER_API_KEY", "test-key")
+
+    config = server_config()["onecompiler"]
+
+    assert config["transport"] == "streamable_http"
+    assert config["url"] == "https://mcp.rapidapi.com"
+    assert config["headers"]["x-api-host"] == "onecompiler-apis.p.rapidapi.com"

@@ -229,6 +229,44 @@ class TestOneCompilerServer:
             "onecompiler-1.p.rapidapi.com"
         )
 
+    @patch("mcp_servers.onecompiler_server.httpx.post")
+    def test_official_key_ignores_stale_rapidapi_provider(
+        self, mock_post, monkeypatch
+    ):
+        monkeypatch.setenv("ONECOMPILER_API_KEY", "oc_test-key")
+        monkeypatch.setenv("ONECOMPILER_PROVIDER", "rapidapi")
+        response = MagicMock()
+        response.json.return_value = {"stdout": "5"}
+        response.raise_for_status = MagicMock()
+        mock_post.return_value = response
+
+        execute_code("python", "print(2 + 3)")
+
+        request = mock_post.call_args
+        assert request.args[0] == "https://onecompiler.com/api/code/exec"
+        assert request.kwargs["headers"]["X-API-Key"] == "oc_test-key"
+
+    @patch("mcp_servers.onecompiler_server.httpx.post")
+    def test_http_errors_include_provider_response(
+        self, mock_post, monkeypatch
+    ):
+        monkeypatch.setenv("ONECOMPILER_API_KEY", "test-key")
+        monkeypatch.setenv("ONECOMPILER_PROVIDER", "direct")
+        response = MagicMock()
+        response.status_code = 404
+        response.text = '{"message":"API does not exist"}'
+        mock_post.return_value = response
+        from httpx import HTTPStatusError, Request, Response
+        mock_post.return_value.raise_for_status.side_effect = HTTPStatusError(
+            "not found",
+            request=Request("POST", "https://onecompiler.com/api/code/exec"),
+            response=Response(404),
+        )
+        mock_post.return_value.text = '{"message":"API does not exist"}'
+
+        with pytest.raises(RuntimeError, match="HTTP 404"):
+            execute_code("python", "print(2 + 3)")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Memory server tests

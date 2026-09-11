@@ -8,11 +8,12 @@ from contextlib import AsyncExitStack
 
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 
 from graph.state import get_current_topic
-from mcp_client import server_config
+from mcp_client import call_tool, server_config
 from model_config import build_chat_model
 
 MAX_EXPLAINER_ITERATIONS = 6
@@ -94,6 +95,65 @@ def _parse_status_response(content: str) -> tuple[str, bool, bool] | None:
     return status, requested, awaiting
 
 
+async def _search_learning_resources(topic_title: str) -> list[str]:
+    """Return real Tavily URLs for the topic, without trusting model citations."""
+    result = await call_tool(
+        "tavily",
+        "search_web",
+        {
+            "query": f"{topic_title} authoritative course documentation tutorial",
+            "max_results": 5,
+            "search_depth": "basic",
+        },
+    )
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except json.JSONDecodeError:
+            return []
+    if isinstance(result, dict) and isinstance(result.get("content"), list):
+        text_parts = [
+            block.get("text", "")
+            for block in result["content"]
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        ]
+        if text_parts:
+            try:
+                result = json.loads("".join(text_parts))
+            except json.JSONDecodeError:
+                pass
+    if isinstance(result, list):
+        result = {"results": result}
+    if not isinstance(result, dict):
+        return []
+    urls: list[str] = []
+    for item in result.get("results", []):
+        if isinstance(item, dict):
+            url = item.get("url")
+            if isinstance(url, str) and url.startswith(("http://", "https://")):
+                urls.append(url)
+    return list(dict.fromkeys(urls))
+
+
+def add_learning_resources(explanation: str, topic_title: str) -> str:
+    """Append verified source links to every explainer answer."""
+    try:
+        urls = asyncio.run(_search_learning_resources(topic_title))
+    except Exception as error:
+        print(f"[Explainer] Learning-resource search unavailable: {error}")
+        return explanation
+    if not urls:
+        return (
+            explanation.rstrip()
+            + "\n\n### Further learning\n"
+            + "No verified course or material URL was returned by Tavily for this answer."
+        )
+    sources = "\n\n### Further learning\n" + "\n".join(
+        f"- [{url}]({url})" for url in urls
+    )
+    return explanation.rstrip() + sources
+
+
 def classify_explainer_status(
         topic_title: str,
         learner_message: str,
@@ -103,6 +163,7 @@ def classify_explainer_status(
         iterations: int,
         model_provider: str,
         model_name: str = "",
+        callbacks: list | None = None,
 ) -> tuple[str, bool, bool]:
     """Use the selected LLM to decide the next pedagogical state."""
     fallback = determine_explainer_status(
@@ -111,8 +172,11 @@ def classify_explainer_status(
     if fallback[1]:
         return fallback
     try:
-        model = build_chat_model(model_provider, model_name or None, 0.0, json_mode=True)
-        response = model.invoke(
+        model = build_chat_model(
+            model_provider, model_name or None, 0.0,
+            json_mode=True, reasoning_effort="low",
+        )
+        classifier_prompt = (
             f"{STATUS_CLASSIFIER_PROMPT}\n\n"
             f"Topic: {topic_title}\n"
             f"Learner message: {learner_message or '(initial explanation)'}\n"
@@ -120,6 +184,12 @@ def classify_explainer_status(
             f"Previous status: {previous_status}\n"
             f"Awaiting approval: {awaiting_approval}\n"
             f"Explainer iterations: {iterations}"
+        )
+        invoke_config = {"callbacks": callbacks} if callbacks else None
+        response = (
+            model.invoke(classifier_prompt, config=invoke_config)
+            if invoke_config
+            else model.invoke(classifier_prompt)
         )
         return _parse_status_response(str(response.content)) or fallback
     except Exception as error:
@@ -134,7 +204,12 @@ async def _run_explainer_agent(
     learner_message: str,
     model_provider: str = "ollama",
     model_name: str = "",
+    callbacks: list | None = None,
 ) -> tuple[list, AIMessage]:
+    print(
+        f"\n[Explainer] Learner input: "
+        f"{learner_message or '(initial explanation request)'}"
+    )
     client = MultiServerMCPClient(server_config())
     async with AsyncExitStack() as stack:
         sessions = [
@@ -145,29 +220,39 @@ async def _run_explainer_agent(
         for session in sessions:
             tools.extend(await load_mcp_tools(session))
         agent = create_agent(
-            model=build_chat_model(model_provider, model_name or None, 0.3),
+            model=build_chat_model(
+                model_provider, model_name or None, 0.3,
+                reasoning_effort="medium",
+            ),
             tools=tools,
             system_prompt=EXPLAINER_SYSTEM_PROMPT,
             checkpointer=False,
             name="explainer",
         )
-        result = await agent.ainvoke({"messages": [HumanMessage(content=(
+        invoke_config = {"callbacks": callbacks} if callbacks else None
+        request = {"messages": [HumanMessage(content=(
             f"Topic: {topic_title}\nContext: {topic_description}\n"
             f"Session ID: {session_id}\nLearner message: "
             f"{learner_message or '(start by explaining the topic)'}"
-        ))]})
-        return result["messages"], result["messages"][-1]
+        ))]}
+        result = (
+            await agent.ainvoke(request, config=invoke_config)
+            if invoke_config
+            else await agent.ainvoke(request)
+        )
+        response = result["messages"][-1]
+        print(f"[Explainer] Tutor output:\n{response.content}\n")
+        return result["messages"], response
 
 
-def explainer_node(state: dict) -> dict:
+def explainer_node(state: dict, config: RunnableConfig | None = None) -> dict:
     topic = get_current_topic(state)
     if topic is None:
         return {"error": "No current topic found. Curriculum Planner must run first."}
-    learner_message = next(
-        (str(m.content) for m in reversed(state.get("messages", []))
-         if isinstance(m, HumanMessage) and m.content),
-        "",
-    )
+    # Read only the explicit learner input. The shared message history also
+    # contains the planner prompt, which is not a question for the tutor.
+    learner_message = str(state.get("learner_message", "") or "").strip()
+    callbacks = (config or {}).get("callbacks")
     previous_status = state.get("explainer_status", "CONTINUE")
     awaiting_approval = bool(state.get("awaiting_quiz_approval", False))
     iterations_before = int(state.get("explainer_iterations", 0))
@@ -176,6 +261,7 @@ def explainer_node(state: dict) -> dict:
             topic.title, topic.description, state.get("session_id", "unknown"),
             learner_message, state.get("model_provider", "ollama"),
             state.get("model_name", ""),
+            callbacks=callbacks,
         ))
     except Exception as error:
         return {"error": f"Explainer agent failed: {error}"}
@@ -188,12 +274,18 @@ def explainer_node(state: dict) -> dict:
         iterations_before,
         state.get("model_provider", "ollama"),
         state.get("model_name", ""),
+        callbacks=callbacks,
     )
     iterations = min(int(state.get("explainer_iterations", 0)) + 1, MAX_EXPLAINER_ITERATIONS)
     if iterations >= MAX_EXPLAINER_ITERATIONS and status == "CONTINUE":
         status, awaiting = "AWAITING_QUIZ_APPROVAL", True
+    enriched_content = add_learning_resources(str(response.content), topic.title)
+    if enriched_content != str(response.content):
+        messages = list(messages)
+        messages[-1] = AIMessage(content=enriched_content)
     return {
         "messages": messages,
+        "explanation": enriched_content,
         "explainer_status": status,
         "explainer_iterations": iterations,
         "quiz_requested": requested,

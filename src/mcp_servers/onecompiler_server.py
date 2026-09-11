@@ -8,6 +8,9 @@ from typing import Any
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from dotenv import load_dotenv
+
+load_dotenv()
 
 mcp = FastMCP("OneCompiler Remote Execution")
 ONECOMPILER_URL = "https://onecompiler.com/api/code/exec"
@@ -36,9 +39,13 @@ def execute_code(
     if version:
         payload["version"] = version
 
-    provider = os.getenv("ONECOMPILER_PROVIDER", "direct").lower()
+    provider = os.getenv("ONECOMPILER_PROVIDER", "direct").strip().lower()
+    # Official OneCompiler keys use the `oc_` prefix. If an old RapidAPI
+    # provider value remains in .env, do not send that key to a dead route.
+    if provider == "rapidapi" and api_key.startswith("oc_"):
+        provider = "direct"
     headers = {"Content-Type": "application/json"}
-    endpoint = ONECOMPILER_URL
+    endpoint = os.getenv("ONECOMPILER_ENDPOINT", "").strip() or ONECOMPILER_URL
     if provider == "rapidapi":
         endpoint = RAPIDAPI_URL
         headers.update({
@@ -48,14 +55,28 @@ def execute_code(
     else:
         headers["X-API-Key"] = api_key
 
-    response = httpx.post(
-        endpoint,
-        headers=headers,
-        json=payload,
-        timeout=30.0,
-    )
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = httpx.post(
+            endpoint,
+            headers=headers,
+            json=payload,
+            timeout=30.0,
+        )
+        response.raise_for_status()
+    except httpx.HTTPStatusError as error:
+        detail = error.response.text.strip() or "no response body"
+        raise RuntimeError(
+            f"OneCompiler returned HTTP {error.response.status_code}: {detail}"
+        ) from error
+    except httpx.HTTPError as error:
+        raise RuntimeError(f"OneCompiler request failed: {error}") from error
+
+    try:
+        return response.json()
+    except ValueError as error:
+        raise RuntimeError(
+            "OneCompiler returned a non-JSON response"
+        ) from error
 
 
 if __name__ == "__main__":
