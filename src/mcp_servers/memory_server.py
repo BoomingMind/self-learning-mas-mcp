@@ -18,17 +18,16 @@ In this project it's used to:
     - Store quiz scores per topic (Quiz Generator writes)
     - Provide progress context to the Progress Coach (reads)
 
-Production note:
-    This implementation stores data in-process (a Python dict).
-    Data is lost when the server restarts. For production, replace
-    the _store dict with Redis or PostgreSQL. The MCP interface
-    stays identical, only the backend changes.
+Storage:
+    Redis provides shared persistent storage. Configure REDIS_URL, or
+    REDIS_HOST/REDIS_PORT/REDIS_PASSWORD/REDIS_DB.
 
 Tools exposed:
     memory_set(session_id, key, value)    : store a value
     memory_get(session_id, key)           : retrieve a value
     memory_list_keys(session_id)          : list stored keys
     memory_delete(session_id, key)        : remove a key
+    memory_delete_session(session_id)    : remove all session memory
 
 Resources exposed:
     notes://session/{session_id}          : full session summary
@@ -38,10 +37,14 @@ Run standalone for testing:
 """
 
 import json
+import os
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 from mcp.server.fastmcp import FastMCP
+import redis
+from dotenv import load_dotenv
 
+load_dotenv()
 mcp = FastMCP("Memory Server")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -54,7 +57,30 @@ mcp = FastMCP("Memory Server")
 # users run the system concurrently.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_store: dict[str, dict] = {}
+_redis_client: redis.Redis | None = None
+REDIS_KEY_PREFIX = "learning-memory:"
+
+
+def _get_redis_client() -> redis.Redis:
+    """Create the shared Redis client lazily for MCP subprocess startup."""
+    global _redis_client
+    if _redis_client is None:
+        url = os.getenv("REDIS_URL", "").strip()
+        if url:
+            _redis_client = redis.Redis.from_url(url, decode_responses=True)
+        else:
+            _redis_client = redis.Redis(
+                host=os.getenv("REDIS_HOST", "127.0.0.1"),
+                port=int(os.getenv("REDIS_PORT", "6379")),
+                db=int(os.getenv("REDIS_DB", "1")),
+                password=os.getenv("REDIS_PASSWORD", ""),
+                decode_responses=True,
+            )
+    return _redis_client
+
+
+def _session_key(session_id: str) -> str:
+    return f"{REDIS_KEY_PREFIX}{session_id}"
 
 
 def _now_iso() -> str:
@@ -88,14 +114,12 @@ def memory_set(session_id: str, key: str, value: Any) -> str:
     """
     stored_value = value if isinstance(value, str) else json.dumps(value)
 
-    if session_id not in _store:
-        _store[session_id] = {}
-
-    _store[session_id][key] = {
+    entry = {
         "value": stored_value,
         "updated_at": _now_iso(),
     }
-    return f"Stored '{key}' for session '{session_id}' at {_store[session_id][key]['updated_at']}"
+    _get_redis_client().hset(_session_key(session_id), key, json.dumps(entry))
+    return f"Stored '{key}' for session '{session_id}' at {entry['updated_at']}"
 
 
 @mcp.tool()
@@ -112,11 +136,11 @@ def memory_get(session_id: str, key: str) -> str:
         doesn't exist. Returns "null" (not Python None) so the
         LLM can handle the missing case without type errors.
     """
-    session = _store.get(session_id, {})
-    entry = session.get(key)
-    if entry is None:
+    raw_entry = _get_redis_client().hget(_session_key(session_id), key)
+    if raw_entry is None:
         return "null"
-    return entry["value"]
+    entry = json.loads(cast(str, raw_entry))
+    return str(entry["value"])
 
 
 @mcp.tool()
@@ -134,7 +158,8 @@ def memory_list_keys(session_id: str) -> list[str]:
         List of key names. Empty list if session doesn't exist
         or has no stored data.
     """
-    return list(_store.get(session_id, {}).keys())
+    keys = cast(list[str], _get_redis_client().hkeys(_session_key(session_id)))
+    return list(keys)
 
 
 @mcp.tool()
@@ -152,11 +177,18 @@ def memory_delete(session_id: str, key: str) -> str:
     Returns:
         Confirmation if deleted, or a message if the key wasn't found.
     """
-    session = _store.get(session_id, {})
-    if key in session:
-        del session[key]
+    if _get_redis_client().hdel(_session_key(session_id), key):
         return f"Deleted '{key}' from session '{session_id}'"
     return f"Key '{key}' not found in session '{session_id}', nothing deleted"
+
+
+@mcp.tool()
+def memory_delete_session(session_id: str) -> str:
+    """Delete all Redis learner memory associated with a session."""
+    deleted = _get_redis_client().delete(_session_key(session_id))
+    if deleted:
+        return f"Deleted all memory for session '{session_id}'"
+    return f"No memory found for session '{session_id}'"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -175,7 +207,10 @@ def get_session_summary(session_id: str) -> str:
     URI: notes://session/{session_id}
     Replace {session_id} with the actual session ID.
     """
-    session = _store.get(session_id, {})
+    raw_session = cast(
+        dict[str, str], _get_redis_client().hgetall(_session_key(session_id))
+    )
+    session = {key: json.loads(raw) for key, raw in raw_session.items()}
     if not session:
         return f"# Session Memory: {session_id}\n\nNo data stored yet."
 
@@ -193,7 +228,7 @@ if __name__ == "__main__":
     # Log startup info to stderr. stdout is the JSON-RPC framing channel
     # under stdio transport, so anything written there would corrupt the protocol.
     print("[Memory MCP] Starting server", file=sys.stderr)
-    print("[Memory MCP] Storage: in-process dict (resets on restart)", file=sys.stderr)
+    print("[Memory MCP] Storage: Redis persistent hashes", file=sys.stderr)
     print("[Memory MCP] Transport: stdio", file=sys.stderr)
     print("[Memory MCP] Waiting for connections...", file=sys.stderr)
     mcp.run()

@@ -38,6 +38,9 @@
 #
 # Redis:
 #   localhost:6379
+#
+# Redis Insight:
+#   http://localhost:5540
 
 
 services:
@@ -399,6 +402,24 @@ services:
 
 
   # ------------------------------------------------------------
+  # Redis Insight - Redis Management GUI
+  # ------------------------------------------------------------
+  redisinsight:
+    image: redis/redisinsight:latest
+    restart: unless-stopped
+
+    depends_on:
+      redis:
+        condition: service_healthy
+
+    ports:
+      - "127.0.0.1:5540:5540"
+
+    volumes:
+      - redisinsight_data:/data
+
+
+  # ------------------------------------------------------------
   # PostgreSQL - Langfuse
   # ------------------------------------------------------------
   postgres:
@@ -479,4 +500,7 @@ volumes:
     driver: local
 
   pgadmin_data:
+    driver: local
+
+  redisinsight_data:
     driver: local
