@@ -37,7 +37,9 @@ Run standalone for testing:
     python mcp_servers/memory_server.py
 """
 
+import json
 from datetime import datetime, timezone
+from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("Memory Server")
@@ -65,13 +67,13 @@ def _now_iso() -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def memory_set(session_id: str, key: str, value: str) -> str:
+def memory_set(session_id: str, key: str, value: Any) -> str:
     """
     Store a value in session memory.
 
-    Values are always strings. For complex data (lists, dicts),
-    serialize to JSON before storing and parse after retrieving.
-    Example: memory_set(session_id, 'quiz_scores', json.dumps([0.8, 0.6]))
+    Values are stored as strings. Strings are stored unchanged; JSON-compatible
+    lists, dictionaries, and scalar values are serialized automatically.
+    Example: memory_set(session_id, 'quiz_scores', [0.8, 0.6])
 
     Args:
         session_id: The current study session ID. Used to scope
@@ -84,11 +86,13 @@ def memory_set(session_id: str, key: str, value: str) -> str:
     Returns:
         Confirmation message with the key and timestamp.
     """
+    stored_value = value if isinstance(value, str) else json.dumps(value)
+
     if session_id not in _store:
         _store[session_id] = {}
 
     _store[session_id][key] = {
-        "value": value,
+        "value": stored_value,
         "updated_at": _now_iso(),
     }
     return f"Stored '{key}' for session '{session_id}' at {_store[session_id][key]['updated_at']}"

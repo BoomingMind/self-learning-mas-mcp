@@ -4,7 +4,7 @@ tests/test_checkpointing.py
 Tests for checkpointing and human-in-the-loop approval.
 
 These tests verify:
-  - SqliteSaver creates and reads checkpoints correctly
+  - PostgresSaver is available for checkpoint storage
   - human_approval_node returns correct state for yes/no
   - route_after_approval routing logic
   - route_after_coach routing logic
@@ -17,10 +17,7 @@ in the integration tests (Batch 9).
 Run: python -m pytest tests/test_checkpointing.py -v
 """
 
-import os
-import tempfile
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -35,40 +32,16 @@ from agents.human_approval import human_approval_node
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SqliteSaver tests
+# PostgresSaver tests
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestSqliteSaver:
-    """Verify SqliteSaver can be imported and initialised."""
+class TestPostgresSaver:
+    """Verify the PostgreSQL checkpointer dependency is available."""
 
-    def test_sqlite_saver_can_be_imported(self):
-        """SqliteSaver should be importable from langgraph."""
-        from langgraph.checkpoint.sqlite import SqliteSaver
-        assert SqliteSaver is not None
-
-    def test_sqlite_saver_creates_db_file(self):
-        """SqliteSaver should create the database file on initialisation."""
-        from langgraph.checkpoint.sqlite import SqliteSaver
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = os.path.join(tmpdir, "test_checkpoints.db")
-            assert not os.path.exists(db_path)
-            # Creating the saver should create the file
-            saver = SqliteSaver.from_conn_string(db_path)
-            # Access the connection to trigger file creation
-            with saver:
-                pass
-            # File should now exist
-            assert os.path.exists(db_path)
-
-    def test_data_directory_created_by_workflow(self):
-        """build_graph() should create data/ directory if it doesn't exist."""
-        # This verifies the Path("data").mkdir(exist_ok=True) line works
-        data_dir = Path("data")
-        # data/ already exists from earlier batches, but exist_ok=True
-        # means calling mkdir on it again is safe
-        data_dir.mkdir(exist_ok=True)
-        assert data_dir.exists()
-
+    def test_postgres_saver_can_be_imported(self):
+        """PostgresSaver should be importable from langgraph."""
+        from langgraph.checkpoint.postgres import PostgresSaver
+        assert PostgresSaver is not None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Human approval node tests

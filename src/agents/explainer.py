@@ -4,12 +4,12 @@ src/agents/explainer.py
 The Explainer agent.
 
 Given a topic from the roadmap, this agent uses MCP tools to retrieve relevant
-study material and session context, then produces a clear, grounded explanation.
+study material and session context, then produces a clear, personalized
+explanation.
 
-The key property: explanations are grounded in YOUR notes,
-not just the LLM's training data. If your notes say something,
-the explanation reflects that. If something isn't in your notes,
-the agent works from general knowledge and says so.
+Study material is optional supporting context, not the only source of truth.
+The agent can explain topics from general knowledge when notes do not cover
+them, while clearly distinguishing notes from its own explanation.
 
 Integration note:
   MCP tools are discovered from independent stdio server processes via
@@ -19,6 +19,7 @@ Integration note:
 
 import asyncio
 import os
+import traceback
 from contextlib import AsyncExitStack
 
 from langchain.agents import create_agent
@@ -43,31 +44,42 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 # ─────────────────────────────────────────────────────────────────────────────
 # System prompt
 #
-# Instructs the LLM on HOW to use the tools, not just that they exist.
-# The approach section is critical, without it the LLM may skip
-# tool calls and explain from training data alone.
+# Instructs the agent on its role and output contract while leaving tool
+# selection to LangChain's tool-calling loop.
 # ─────────────────────────────────────────────────────────────────────────────
 
 EXPLAINER_SYSTEM_PROMPT = """You are an expert tutor explaining topics to a student.
 
-Ground your explanation in the student's study materials whenever they cover
-the topic. Use filesystem tools to discover and retrieve relevant notes, and
-use session memory when prior explanations provide useful context. Decide
-which tools are necessary based on the topic; do not call tools mechanically.
+Use filesystem tools to find relevant study materials when they can personalize
+the explanation, and use session memory when prior explanations provide useful
+context. Decide which tools are necessary based on the topic; do not call them
+mechanically. Treat notes as supporting context, not as a requirement or
+replacement for your general knowledge.
 
 EXPLANATION FORMAT:
 - Start with a real-world analogy (1-2 sentences)
 - State the core concept clearly (2-3 sentences)
-- Show a concrete code example from the student's notes
+- Show a concrete code example; prefer the student's notes when relevant
 - End with one "common mistake" or "gotcha" to watch out for
+- Include a short "Quick check" question the student can answer
 - Target length: 300-500 words
 
+Use prior session context to adapt the depth and examples when it is useful.
 After producing the explanation, record the topic in session memory when the
-memory tools are available.
+memory tools are available. Do not claim that a detail came from the notes
+unless you actually retrieved it.
 
-If the notes don't cover the topic, explain from general knowledge
-and say "Your notes don't cover this specifically, but here's the concept:"
+If the notes do not cover the topic, explain it from general knowledge and say:
+"Your notes don't cover this specifically, but here's the concept:"
 """
+
+
+def _exception_summary(error: BaseException) -> str:
+    """Return the actionable leaf message from nested async task errors."""
+    nested = getattr(error, "exceptions", None)
+    if nested:
+        return "; ".join(_exception_summary(item) for item in nested)
+    return str(error)
 
 
 async def _run_explainer_agent(
@@ -95,6 +107,9 @@ async def _run_explainer_agent(
             model=llm,
             tools=mcp_tools,
             system_prompt=EXPLAINER_SYSTEM_PROMPT,
+            # The outer LangGraph owns PostgreSQL checkpointing. Do not let
+            # this nested async agent inherit its synchronous saver.
+            checkpointer=False,
             name="explainer",
         )
         result = await agent.ainvoke({
@@ -148,9 +163,11 @@ def explainer_node(state: dict) -> dict:
             _run_explainer_agent(topic.title, topic.description, session_id)
         )
     except Exception as e:
-        print(f"[Explainer] MCP agent failed: {e}")
+        detail = _exception_summary(e)
+        print(f"[Explainer] Agent failed: {detail}")
+        traceback.print_exception(e)
         return {
-            "error": f"Explainer MCP agent failed: {e}",
+            "error": f"Explainer agent failed: {detail}",
         }
 
     explanation_length = len(final_response.content)

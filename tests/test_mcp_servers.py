@@ -253,6 +253,11 @@ class TestMemoryServer:
         assert parsed["topics"] == ["closures", "decorators"]
         assert parsed["score"] == 0.85
 
+    def test_structured_values_are_serialized_automatically(self):
+        """MCP tool calls may provide a list directly instead of a JSON string."""
+        memory_set("session-1", "topics", ["Python disclosure"])
+        assert memory_get("session-1", "topics") == '["Python disclosure"]'
+
     def test_list_keys_empty_for_new_session(self):
         """A session with no data should return empty key list."""
         result = memory_list_keys("brand-new-session")

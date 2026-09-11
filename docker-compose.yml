@@ -24,6 +24,9 @@
 # PostgreSQL:
 #   localhost:5432
 #
+# Learning Accelerator checkpoints use the dedicated PostgreSQL container:
+#   postgresql://postgres:postgres@127.0.0.1:5433/checkpoints
+#
 # ClickHouse HTTP:
 #   localhost:8123
 #
@@ -34,6 +37,33 @@
 #   localhost:6379
 
 services:
+
+  # ------------------------------------------------------------
+  # Learning Accelerator checkpoint database
+  # ------------------------------------------------------------
+  checkpoint-postgres:
+    image: docker.io/postgres:16-alpine
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: checkpoints
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      TZ: UTC
+      PGTZ: UTC
+
+    ports:
+      - "127.0.0.1:5433:5432"
+
+    volumes:
+      - learning_checkpoints_postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d checkpoints"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
 
   # ------------------------------------------------------------
   # Langfuse Web UI / API
@@ -384,4 +414,7 @@ volumes:
     driver: local
 
   langfuse_redis_data:
+    driver: local
+
+  learning_checkpoints_postgres_data:
     driver: local

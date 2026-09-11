@@ -11,17 +11,17 @@ Full graph:
         → (rejected)    → curriculum_planner
 
 Key design decisions:
-  - SqliteSaver: checkpoints to disk after every node (survives crashes)
+  - PostgresSaver: checkpoints in the PostgreSQL container
   - interrupt() in human_approval_node: pauses to collect user approval
   - Routing functions are pure Python (no LLM calls in control flow)
   - All business logic lives in agents/, this file is wiring only
 """
 
 import os
-import sqlite3
-from pathlib import Path
+from typing import Any
 
-from langgraph.checkpoint.sqlite import SqliteSaver
+import psycopg
+from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
 
 from agents.curriculum_planner import curriculum_planner_node
@@ -31,7 +31,7 @@ from agents.progress_coach import progress_coach_node
 from agents.quiz_generator import quiz_generator_node
 from graph.state import AgentState, session_is_complete
 
-# Note: LangGraph deserializes dataclasses from SQLite checkpoints as plain
+# Note: LangGraph deserializes dataclasses from PostgreSQL checkpoints as plain
 # dicts. All state accessor functions in graph/state.py handle both dict and
 # dataclass forms via isinstance checks and from_dict() classmethods.
 
@@ -70,27 +70,28 @@ def route_after_coach(state: dict) -> str:
 # Graph construction
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_graph(db_path: str = "data/checkpoints.db", interrupt_before: list | None = None):
+DEFAULT_POSTGRES_URL = (
+    "postgresql://postgres:postgres@127.0.0.1:5433/checkpoints"
+)
+
+
+def build_graph(
+    postgres_url: str | None = None,
+    interrupt_before: list | None = None,
+):
     """
     Build and compile the Learning Accelerator graph.
 
     Args:
-        db_path: Path to SQLite checkpoint database.
+        postgres_url: PostgreSQL connection string for checkpoint storage.
         interrupt_before: List of node names to pause before (for UI integration).
 
-    SqliteSaver persists checkpoints to the specified database.
-    The database file is created automatically if it doesn't exist.
+    PostgresSaver persists checkpoints in PostgreSQL. The checkpoint tables
+    are created automatically on startup.
 
     The human_approval_node uses interrupt() to pause execution
     and wait for user input before proceeding.
     """
-    # Ensure the data directory exists
-    Path("data").mkdir(exist_ok=True)
-
-    # Allow override via environment variable for terminal interface
-    if db_path == "data/checkpoints.db":
-        db_path = os.getenv("CHECKPOINT_DB", "data/checkpoints.db")
-
     builder = StateGraph(AgentState)
 
     # ── Register all nodes ────────────────────────────────────────────
@@ -127,17 +128,17 @@ def build_graph(db_path: str = "data/checkpoints.db", interrupt_before: list | N
         },
     )
 
-    # ── Compile with SQLite checkpointer ─────────────────────────────
-    # CRITICAL: Create connection directly, not via context manager.
-    # The checkpointer must stay open for the life of the process.
-    # graph is a module-level variable that outlives build_graph().
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    checkpointer = SqliteSaver(conn)
+    # ── Compile with PostgreSQL checkpointer ──────────────────────────
+    # Keep the connection open for the lifetime of the compiled graph.
+    connection: Any = psycopg.connect(
+        postgres_url
+        or os.getenv("CHECKPOINT_POSTGRES_URL", DEFAULT_POSTGRES_URL),
+        autocommit=True,
+    )
+    checkpointer = PostgresSaver(connection)
+    checkpointer.setup()
 
     return builder.compile(
         checkpointer=checkpointer,
         interrupt_before=interrupt_before or [],
     )
-
-
-graph = build_graph()

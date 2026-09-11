@@ -7,7 +7,7 @@ This is the single most important file in the project.
 Every agent, Curriculum Planner, Explainer, Quiz Generator,
 Progress Coach, reads from and writes to this state.
 
-LangGraph checkpoints this entire object to SQLite after every
+LangGraph checkpoints this entire object to PostgreSQL after every
 node execution, which is how the system survives crashes and
 supports human-in-the-loop approval flows.
 

@@ -61,7 +61,6 @@ os.environ.setdefault(
 # This stops the graph before quiz_generator runs so the UI can handle
 # quiz I/O without calling input() which would block Streamlit.
 ui_graph = build_graph(
-    db_path=str(PROJECT_ROOT / "data" / "checkpoints_ui.db"),
     interrupt_before=["quiz_generator"],
 )
 

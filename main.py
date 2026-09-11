@@ -21,14 +21,17 @@ load_dotenv()
 
 from langgraph.types import Command
 
-from graph.workflow import graph
+from graph.workflow import build_graph
 from graph.state import initial_state, StudyRoadmap, QuizResult
 from observability.langfuse_setup import get_langfuse_config, flush_langfuse
+
+graph = build_graph()
 
 
 def print_session_summary(result: dict) -> None:
     """Print a summary of the completed session."""
-    # After SqliteSaver round-trip, roadmap and quiz_results may be plain dicts.
+    # After PostgreSQL checkpoint round-trip, roadmap and quiz_results may be
+    # plain dicts.
     # Coerce them back to dataclasses before accessing attributes.
     raw_roadmap = result.get("roadmap")
     if raw_roadmap is None:
@@ -110,7 +113,8 @@ def run_session(goal: str, session_id: str | None = None) -> None:
     while "__interrupt__" in result:
         interrupt_payload = result["__interrupt__"][0].value
 
-        # After SqliteSaver round-trip, the roadmap in the payload may be a dict.
+        # After PostgreSQL checkpoint round-trip, the roadmap in the payload
+        # may be a dict.
         raw_roadmap = interrupt_payload.get("roadmap")
         roadmap = (
             StudyRoadmap.from_dict(raw_roadmap)
