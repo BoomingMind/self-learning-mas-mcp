@@ -78,15 +78,11 @@ def sample_state(sample_roadmap):
 
 
 @pytest.fixture
-def closures_note_content():
+def closures_reference_content():
     """
-    The content of the closures.md sample note.
-    Used as retrieval context in faithfulness tests.
+    Reference explanation for Python closures used in eval tests.
+    This keeps the tests grounded without relying on removed study-note files.
     """
-    notes_path = Path(__file__).parent.parent / "study_materials/sample_notes/closures.md"
-    if notes_path.exists():
-        return notes_path.read_text(encoding="utf-8")
-    # Fallback if file doesn't exist
     return """
 # Python Closures
 

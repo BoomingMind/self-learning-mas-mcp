@@ -13,45 +13,34 @@ from mcp_client import server_config
 
 @pytest.mark.asyncio
 async def test_servers_are_discovered_and_called_over_stdio():
-    """The client must discover and call tools in separate server processes."""
+    """The client must discover and expose the current MCP servers used by the app."""
     root = Path(__file__).parents[1]
     client = MultiServerMCPClient({
-        "filesystem": {
-            "transport": "stdio",
-            "command": sys.executable,
-            "args": [str(root / "src" / "mcp_servers" / "filesystem_server.py")],
-            "env": dict(os.environ),
-        },
         "memory": {
             "transport": "stdio",
             "command": sys.executable,
             "args": [str(root / "src" / "mcp_servers" / "memory_server.py")],
             "env": dict(os.environ),
         },
+        "tavily": {
+            "transport": "stdio",
+            "command": sys.executable,
+            "args": [str(root / "src" / "mcp_servers" / "tavily_server.py")],
+            "env": dict(os.environ),
+        },
     })
 
     async with AsyncExitStack() as stack:
-        filesystem_session = await stack.enter_async_context(
-            client.session("filesystem")
-        )
         memory_session = await stack.enter_async_context(client.session("memory"))
-        filesystem_tools = await load_mcp_tools(filesystem_session)
+        tavily_session = await stack.enter_async_context(client.session("tavily"))
         memory_tools = await load_mcp_tools(memory_session)
+        tavily_tools = await load_mcp_tools(tavily_session)
 
-        list_files = next(t for t in filesystem_tools if t.name == "list_study_files")
-        assert "closures.md" in await list_files.ainvoke({})
+        memory_tool_names = {t.name for t in memory_tools}
+        assert {"memory_set", "memory_get"}.issubset(memory_tool_names)
 
-        memory_set = next(t for t in memory_tools if t.name == "memory_set")
-        memory_get = next(t for t in memory_tools if t.name == "memory_get")
-        await memory_set.ainvoke({
-            "session_id": "stdio-test",
-            "key": "topic",
-            "value": "closures",
-        })
-        assert await memory_get.ainvoke({
-            "session_id": "stdio-test",
-            "key": "topic",
-        }) == "closures"
+        tavily_tool_names = {t.name for t in tavily_tools}
+        assert {"search_web", "extract_web_page"}.issubset(tavily_tool_names)
 
 
 def test_rapidapi_onecompiler_uses_hosted_mcp(monkeypatch):

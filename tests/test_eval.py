@@ -11,7 +11,7 @@ Run:
   pytest tests/test_eval.py -v -s -m eval
 
 What these tests check:
-  - Explainer explanations are faithful to source notes
+  - Explainer explanations stay faithful to a supplied concept reference
   - Explainer explanations are relevant to the question asked
   - Quiz questions test understanding, not just recall
   - Progress Coach messages are encouraging and specific
@@ -134,16 +134,16 @@ class TestExplainerQuality:
     Evaluate the quality of Explainer agent output.
 
     These tests answer: "Does the Explainer produce good explanations?"
-    Good = faithful to source notes AND relevant to the question.
+    Good = faithful to the provided concept reference and relevant to the question.
     """
 
     FAITHFULNESS_THRESHOLD = 0.6
     RELEVANCY_THRESHOLD = 0.6
 
     @pytest.fixture(autouse=True)
-    def setup(self, closures_note_content):
+    def setup(self, closures_reference_content):
         """Run the Explainer once and reuse the output across tests."""
-        self.retrieval_context = [closures_note_content]
+        self.retrieval_context = [closures_reference_content]
 
         print("\n[TestExplainerQuality] Running Explainer for closures topic...")
         self.explanation = run_explainer(
@@ -157,15 +157,15 @@ class TestExplainerQuality:
 
         print(f"[TestExplainerQuality] Explanation length: {len(self.explanation)} chars")
 
-    def test_explanation_is_faithful_to_notes(self):
+    def test_explanation_is_faithful_to_reference_context(self):
         """
-        The explanation should not hallucinate facts not in the source notes.
+        The explanation should not hallucinate facts not present in the
+        reference context.
 
-        Faithfulness measures: is everything stated in the explanation
-        supported by the retrieval context (the notes)?
+        Faithfulness measures whether the explanation is supported by the
+        supplied concept reference rather than by generic model memory alone.
 
-        A low faithfulness score means the agent is making things up
-        rather than grounding its explanation in the actual notes.
+        A low faithfulness score means the agent is making unsupported claims.
         """
         try:
             from deepeval import evaluate
@@ -200,7 +200,7 @@ class TestExplainerQuality:
         assert metric.score >= self.FAITHFULNESS_THRESHOLD, (
             f"Faithfulness score {metric.score:.3f} below threshold "
             f"{self.FAITHFULNESS_THRESHOLD}.\n"
-            "The explanation may contain hallucinated facts not in the notes.\n"
+            "The explanation may contain unsupported facts relative to the reference context.\n"
             f"Reason: {getattr(metric, 'reason', 'not available')}"
         )
 
@@ -294,7 +294,7 @@ class TestQuizGeneratorQuality:
 
     QUESTION_QUALITY_THRESHOLD = 0.6
 
-    def test_generated_questions_test_understanding(self, closures_note_content):
+    def test_generated_questions_test_understanding(self, closures_reference_content):
         """
         Quiz questions should require genuine understanding, not just recall.
 
@@ -317,7 +317,7 @@ class TestQuizGeneratorQuality:
         print("\n[TestQuizQuality] Generating quiz questions...")
         questions = generate_questions(
             topic="Python Closures",
-            explanation=closures_note_content,
+            explanation=closures_reference_content,
             n=3,
         )
 
@@ -341,7 +341,7 @@ class TestQuizGeneratorQuality:
                 "understanding of Python closures rather than surface-level recall. "
                 "Good questions require the student to: apply concepts to new situations, "
                 "explain WHY something works, identify edge cases, or compare concepts. "
-                "Poor questions only ask to define terms or recite examples from the notes."
+                "Poor questions only ask to define terms or recite examples from the reference material."
             ),
             evaluation_params=[LLMTestCaseParams.ACTUAL_OUTPUT],
             model=judge,
@@ -361,7 +361,7 @@ class TestQuizGeneratorQuality:
             f"Questions generated:\n{questions_text}"
         )
 
-    def test_questions_have_required_structure(self, closures_note_content):
+    def test_questions_have_required_structure(self, closures_reference_content):
         """
         Each generated question must have the required fields.
 
@@ -371,7 +371,7 @@ class TestQuizGeneratorQuality:
 
         questions = generate_questions(
             topic="Python Closures",
-            explanation=closures_note_content,
+            explanation=closures_reference_content,
             n=3,
         )
 

@@ -25,14 +25,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# We import the functions directly, not the mcp server object
-from mcp_servers.filesystem_server import (
-    list_study_files,
-    read_study_file,
-    search_notes,
-    get_notes_index,
-    NOTES_BASE,
-)
 from mcp_servers.memory_server import (
     memory_set,
     memory_get,
@@ -43,164 +35,53 @@ from mcp_servers.memory_server import (
 )
 import mcp_servers.memory_server as memory_server
 from mcp_servers.onecompiler_server import execute_code
+from mcp_servers.tavily_server import search_web, extract_web_page
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Filesystem server tests
+# Tavily server tests
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestListStudyFiles:
-    """Tests for the list_study_files tool."""
+class TestTavilyServer:
+    """Verify the web-search MCP tool contract without external network calls."""
 
-    def test_returns_list(self):
-        """Should always return a list, even if empty."""
-        result = list_study_files()
-        assert isinstance(result, list)
+    @patch("mcp_servers.tavily_server._client")
+    def test_search_web_uses_tavily_query_and_limits(self, mock_client):
+        mock_client.return_value.search.return_value = {"results": [{"url": "https://example.com"}]}
 
-    def test_finds_sample_notes(self):
-        """Should find the three sample note files from Batch 1."""
-        result = list_study_files()
-        # We know these exist from Batch 1 setup
-        assert len(result) >= 1, (
-            "No .md files found. Make sure study_materials/sample_notes/ "
-            "contains the files created in Batch 1."
+        result = search_web(
+            query="Python closures explained",
+            max_results=3,
+            search_depth="advanced",
+            include_domains=["docs.python.org"],
+            exclude_domains=["example.com"],
         )
 
-    def test_returns_only_md_files(self):
-        """All returned files should end in .md."""
-        result = list_study_files()
-        for filename in result:
-            assert filename.endswith(".md"), (
-                f"Non-.md file returned: {filename}"
-            )
-
-    def test_results_are_sorted(self):
-        """Results should be in alphabetical order."""
-        result = list_study_files()
-        assert result == sorted(result)
-
-    def test_returns_relative_paths(self):
-        """Paths should be relative, not absolute."""
-        result = list_study_files()
-        for filename in result:
-            assert not filename.startswith("/"), (
-                f"Absolute path returned: {filename}"
-            )
-
-
-class TestReadStudyFile:
-    """Tests for the read_study_file tool."""
-
-    def test_reads_existing_file(self):
-        """Should return file content for a known file."""
-        files = list_study_files()
-        if not files:
-            pytest.skip("No study files available")
-        content = read_study_file(files[0])
-        assert isinstance(content, str)
-        assert len(content) > 0
-        assert not content.startswith("Error:")
-
-    def test_closures_file_contains_expected_content(self):
-        """The closures.md file should contain closure-related content."""
-        content = read_study_file("closures.md")
-        assert "closure" in content.lower(), (
-            "closures.md doesn't contain 'closure', check the file content"
+        assert result["results"][0]["url"] == "https://example.com"
+        mock_client.return_value.search.assert_called_once_with(
+            query="Python closures explained",
+            max_results=3,
+            search_depth="advanced",
+            include_domains=["docs.python.org"],
+            exclude_domains=["example.com"],
         )
 
-    def test_nonexistent_file_returns_error_string(self):
-        """Missing files should return error string, not raise exception."""
-        result = read_study_file("does_not_exist.md")
-        assert result.startswith("Error:")
-        assert "not found" in result
+    @patch("mcp_servers.tavily_server._client")
+    def test_extract_web_page_calls_tavily_extract_for_selected_url(self, mock_client):
+        mock_client.return_value.extract.return_value = {"content": "excerpt"}
 
-    def test_path_traversal_blocked(self):
-        """Path traversal attempts should return error string."""
-        result = read_study_file("../../.env")
-        assert result.startswith("Error:")
-        assert "traversal" in result.lower()
+        result = extract_web_page("https://docs.python.org/3/library/collections.html")
 
-    def test_non_md_file_blocked(self):
-        """Non-.md files should return error string."""
-        result = read_study_file("requirements.txt")
-        assert result.startswith("Error:")
+        assert result["content"] == "excerpt"
+        mock_client.return_value.extract.assert_called_once_with(urls=["https://docs.python.org/3/library/collections.html"])
 
-    def test_returns_string_not_bytes(self):
-        """Content should be decoded string, not bytes."""
-        files = list_study_files()
-        if not files:
-            pytest.skip("No study files available")
-        content = read_study_file(files[0])
-        assert isinstance(content, str)
+    def test_search_web_requires_query(self):
+        with pytest.raises(ValueError, match="query must not be empty"):
+            search_web("   ")
 
-
-class TestSearchNotes:
-    """Tests for the search_notes tool."""
-
-    def test_returns_list(self):
-        """Should always return a list."""
-        result = search_notes("python")
-        assert isinstance(result, list)
-
-    def test_finds_known_term(self):
-        """Searching for 'closure' should find results in closures.md."""
-        results = search_notes("closure")
-        assert len(results) > 0, (
-            "No results for 'closure', check closures.md exists and contains this term"
-        )
-
-    def test_result_has_required_keys(self):
-        """Each result should have file, line_number, and line keys."""
-        results = search_notes("def")
-        if not results:
-            pytest.skip("No results found for 'def'")
-        for result in results:
-            assert "file" in result
-            assert "line_number" in result
-            assert "line" in result
-
-    def test_line_numbers_are_positive_integers(self):
-        """Line numbers should be 1-based positive integers."""
-        results = search_notes("python")
-        for result in results:
-            assert isinstance(result["line_number"], int)
-            assert result["line_number"] >= 1
-
-    def test_case_insensitive_search(self):
-        """Search should be case-insensitive."""
-        upper = search_notes("CLOSURE")
-        lower = search_notes("closure")
-        mixed = search_notes("Closure")
-        # All should return the same number of results
-        assert len(upper) == len(lower) == len(mixed)
-
-    def test_max_results_is_20(self):
-        """Search should return at most 20 results."""
-        # Search for 'e', will match many lines
-        results = search_notes("e")
-        assert len(results) <= 20
-
-    def test_no_match_returns_empty_list(self):
-        """Searching for gibberish should return empty list, not error."""
-        results = search_notes("xyzzy_impossible_string_12345")
-        assert results == []
-
-
-class TestGetNotesIndex:
-    """Tests for the notes://index resource."""
-
-    def test_returns_string(self):
-        result = get_notes_index()
-        assert isinstance(result, str)
-
-    def test_contains_markdown_header(self):
-        result = get_notes_index()
-        assert "# Study Materials Index" in result
-
-    def test_lists_known_files(self):
-        result = get_notes_index()
-        # closures.md was created in Batch 1
-        assert "closures.md" in result
+    def test_extract_web_page_requires_url(self):
+        with pytest.raises(ValueError, match="url must not be empty"):
+            extract_web_page("   ")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
